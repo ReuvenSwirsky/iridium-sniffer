@@ -791,6 +791,23 @@ int burst_downmix_process(burst_downmix_t *dm, burst_data_t *burst,
     downmix_frame_t *frame = malloc(sizeof(*frame));
     frame->id = burst->info.id;
     frame->timestamp = timestamp + (uint64_t)((double)start / dm->output_sample_rate * 1e9);
+
+    /* Compute first_symbol_ns: absolute wall-clock time of the first preamble
+     * symbol.  After burst start (at 'start' in decimated samples), the preamble
+     * begins 'preamble_symbols * sps' samples before the UW.  We back-calculate
+     * from uw_start (integer samples in the decimated+RRC frame relative to the
+     * burst energy start) to find the preamble position, then convert to ns. */
+    {
+        int preamble_syms = (direction == DIR_DOWNLINK)
+            ? IR_PREAMBLE_LENGTH_SHORT : 32;
+        int preamble_start = uw_start - (int)(preamble_syms * dm->samples_per_symbol);
+        if (preamble_start < 0) preamble_start = 0;
+        frame->first_symbol_ns = (burst->start_time_ns != 0)
+            ? frame->timestamp
+              + (uint64_t)((double)preamble_start / dm->output_sample_rate * 1e9)
+            : 0;
+    }
+
     frame->center_frequency = center_frequency;
     frame->sample_rate = (float)dm->output_sample_rate;
     frame->samples_per_symbol = dm->samples_per_symbol;

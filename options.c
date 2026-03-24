@@ -115,6 +115,9 @@ extern int vita49_enabled;
 extern char *vita49_endpoint;
 extern int clock_source;
 extern int time_source;
+#ifdef HAVE_UHD
+extern int usrp_pps_ref;
+#endif
 
 static void usage(int exitcode) {
     fprintf(stderr,
@@ -137,6 +140,10 @@ static void usage(int exitcode) {
 "    -B, --bias-tee           enable bias tee power\n"
 "    --clock-source=SRC       clock reference: internal (default), external, gpsdo\n"
 "    --time-source=SRC        time/PPS reference: internal (default), external, gpsdo\n"
+"    --pps-ref                wait for external PPS lock after USRP setup and set device\n"
+"                             time at next PPS edge for precise packet arrival timestamps\n"
+"                             (USRP only; requires --clock-source=external or gpsdo and\n"
+"                              --time-source=external or gpsdo; does not change output format)\n"
 "\n"
 "Gain options:\n"
 "    --hackrf-lna=GAIN       HackRF LNA gain in dB (default: 40)\n"
@@ -271,6 +278,7 @@ void parse_options(int argc, char **argv) {
         OPT_TIME_SOURCE,
         OPT_SDRPLAY_GAIN,
         OPT_VITA49,
+        OPT_PPS_REF,
     };
 
     static const struct option longopts[] = {
@@ -317,6 +325,7 @@ void parse_options(int argc, char **argv) {
         { "time-source",    required_argument, NULL, OPT_TIME_SOURCE },
         { "sdrplay-gain",   required_argument, NULL, OPT_SDRPLAY_GAIN },
         { "vita49",         optional_argument, NULL, OPT_VITA49 },
+        { "pps-ref",        no_argument,       NULL, OPT_PPS_REF },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -583,6 +592,14 @@ void parse_options(int argc, char **argv) {
                     zmq_sub_endpoint = strdup(optarg);
 #else
                 errx(1, "--zmq-sub requires ZMQ support (install libzmq3-dev and rebuild)");
+#endif
+                break;
+
+            case OPT_PPS_REF:
+#ifdef HAVE_UHD
+                usrp_pps_ref = 1;
+#else
+                errx(1, "--pps-ref requires UHD (USRP) support");
 #endif
                 break;
 

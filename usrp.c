@@ -5,10 +5,12 @@
 
 #include <err.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <uhd.h>
@@ -22,6 +24,7 @@ extern double center_freq;
 extern int usrp_gain_val;
 extern int clock_source;
 extern int time_source;
+extern int usrp_pps_ref;
 extern int verbose;
 
 #define KVLEN 16
@@ -171,6 +174,60 @@ uhd_usrp_handle usrp_setup(char *serial) {
             errx(1, "Unable to set USRP time source to gpsdo: %u", error);
         if (verbose)
             fprintf(stderr, "USRP: time source set to gpsdo\n");
+    }
+
+    /* If --pps-ref was requested, wait for the PPS reference to lock and then
+     * set the device time at the next PPS pulse so that RX metadata timestamps
+     * represent real wall-clock nanoseconds.  The output format is unchanged;
+     * downstream code already converts hardware timestamps to relative ms. */
+    if (usrp_pps_ref) {
+        /* Try the three most common sensor names; boards differ. */
+        static const char * const lock_sensors[] = {
+            "pps_locked", "gps_locked", "ref_locked", NULL
+        };
+        const int max_tries = 30;   /* 30 s timeout */
+        bool locked = false;
+        if (verbose)
+            fprintf(stderr, "USRP: waiting for PPS/reference lock (max %d s)...\n",
+                    max_tries);
+        for (int attempt = 0; attempt < max_tries && !locked; ++attempt) {
+            for (int si = 0; lock_sensors[si] && !locked; ++si) {
+                uhd_sensor_value_handle sv;
+                if (uhd_usrp_get_mboard_sensor(usrp, lock_sensors[si], 0, &sv)
+                        == UHD_ERROR_NONE) {
+                    bool b = false;
+                    uhd_sensor_value_to_bool(sv, &b);
+                    uhd_sensor_value_free(&sv);
+                    if (b) {
+                        locked = true;
+                        if (verbose)
+                            fprintf(stderr, "USRP: %s asserted after %d s\n",
+                                    lock_sensors[si], attempt);
+                    }
+                }
+            }
+            if (!locked)
+                sleep(1);
+        }
+        if (!locked)
+            warnx("USRP: PPS/reference lock timed out; timestamps may be inaccurate");
+
+        /* Set device time at the next PPS edge.  Use current system time + 1 s
+         * so that the full-seconds counter sent to set_time_next_pps is the
+         * integer second that will roll over on the upcoming PPS pulse. */
+        time_t now = time(NULL);
+        if ((error = uhd_usrp_set_time_next_pps(usrp, (int64_t)(now + 1), 0.0, 0))
+                != UHD_ERROR_NONE)
+            warnx("USRP: set_time_next_pps failed: %u (timestamps may be inaccurate)",
+                  error);
+        else {
+            /* Wait one more second so the PPS latch has definitely occurred
+             * before streaming starts. */
+            sleep(2);
+            if (verbose)
+                fprintf(stderr, "USRP: device time set at next PPS (epoch %ld)\n",
+                        (long)(now + 1));
+        }
     }
 
     if ((error = uhd_usrp_set_rx_rate(usrp, samp_rate, 0)) != UHD_ERROR_NONE)

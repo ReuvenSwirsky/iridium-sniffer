@@ -523,6 +523,7 @@ int qpsk_demod(downmix_frame_t *in, demod_frame_t **out)
     demod_frame_t *frame = calloc(1, sizeof(demod_frame_t));
     frame->id = in->id;
     frame->timestamp = in->timestamp;
+    frame->first_symbol_ns = in->first_symbol_ns;
     frame->direction = in->direction;
     frame->magnitude = in->magnitude;
     frame->noise = in->noise;

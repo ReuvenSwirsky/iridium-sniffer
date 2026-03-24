@@ -226,6 +226,8 @@ int beam_cache_lookup(uint64_t ts_ns, double *lat, double *lon,
 /* Clock/time source (CLOCK_SRC_INTERNAL/EXTERNAL/GPSDO from sdr.h) */
 int clock_source = CLOCK_SRC_INTERNAL;
 int time_source = CLOCK_SRC_INTERNAL;
+/* When 1, wait for PPS lock after USRP setup and set device time at next PPS */
+int usrp_pps_ref = 0;
 
 /* Threading state */
 volatile sig_atomic_t running = 1;

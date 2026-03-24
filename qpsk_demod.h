@@ -35,6 +35,8 @@ typedef struct {
     uint8_t *bits;              /* 2 bits per symbol (0 or 1 each) */
     float *llr;                 /* per-bit reliability (|distance from boundary|) */
     int n_bits;
+    uint64_t first_symbol_ns;   /* absolute wall-clock ns of first preamble symbol;
+                                 * 0 when no hardware timestamp is available */
 } demod_frame_t;
 
 /* Demodulate a downmixed frame. Returns 1 on success, 0 if frame invalid.

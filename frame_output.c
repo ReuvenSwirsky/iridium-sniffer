@@ -36,6 +36,11 @@
 extern int diagnostic_mode;
 extern int parsed_mode;
 extern int acars_enabled;
+#ifdef HAVE_UHD
+extern int usrp_pps_ref;
+#else
+static const int usrp_pps_ref = 0;
+#endif
 
 static const char *out_file_info = NULL;
 static uint64_t t0 = 0;
@@ -196,6 +201,15 @@ void frame_output_print(demod_frame_t *frame)
 
     buf_char('\n');
     buf_flush(!suppress_stdout);
+
+    /* When --pps-ref is active, emit first-symbol absolute timestamp to
+     * stderr so it is completely isolated from the stdout RAW stream.  This
+     * leaves the machine-readable output format unchanged while giving
+     * operators wall-clock burst timing at full hardware timebase precision. */
+    if (usrp_pps_ref && frame->first_symbol_ns != 0) {
+        fprintf(stderr, "# TIMING I:%011" PRIu64 " first_symbol_ns=%" PRIu64 "\n",
+                frame->id, frame->first_symbol_ns);
+    }
 }
 
 /* ---- Parsed IDA output (iridium-parser.py compatible) ---- */

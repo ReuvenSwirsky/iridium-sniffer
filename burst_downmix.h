@@ -46,6 +46,10 @@ typedef struct {
     float magnitude;            /* SNR dB from detector */
     float noise;                /* dBFS/Hz from detector */
     float uw_start;             /* sub-sample correction */
+    uint64_t first_symbol_ns;   /* absolute wall-clock ns of first preamble symbol
+                                 * (0 when no hardware timestamp is available);
+                                 * computed from start_time_ns + sample offsets
+                                 * with corrections for all filter group delays. */
     size_t num_samples;
     float complex *samples;     /* IQ data starting at unique word */
 } downmix_frame_t;
