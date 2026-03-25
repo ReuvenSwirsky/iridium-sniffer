@@ -181,68 +181,21 @@ uhd_usrp_handle usrp_setup(char *serial) {
      * represent real wall-clock nanoseconds.  The output format is unchanged;
      * downstream code already converts hardware timestamps to relative ms. */
     if (usrp_pps_ref) {
-        /* Candidates to check; actual availability depends on hardware. */
-        static const char * const lock_sensor_candidates[] = {
-            "pps_locked", "gps_locked", "ref_locked", NULL
-        };
-        const int max_tries = 30;   /* 30 s timeout */
-        bool locked = false;
-
-        /* Calling get_mboard_sensor with an unknown sensor name causes a
-         * SIGSEGV inside some UHD versions, so enumerate the sensors that
-         * actually exist on this device before querying any of them. */
-        const char *available[4] = {NULL};
-        int n_available = 0;
-        uhd_string_vector_handle sensor_names = NULL;
-        if (uhd_string_vector_make(&sensor_names) == UHD_ERROR_NONE &&
-                uhd_usrp_get_mboard_sensor_names(usrp, 0, &sensor_names) == UHD_ERROR_NONE) {
-            size_t n = 0;
-            uhd_string_vector_size(sensor_names, &n);
-            char buf[64];
-            for (size_t i = 0; i < n; ++i) {
-                if (uhd_string_vector_at(sensor_names, i, buf, sizeof(buf)) != UHD_ERROR_NONE)
-                    continue;
-                for (int ci = 0; lock_sensor_candidates[ci]; ++ci) {
-                    if (strcmp(buf, lock_sensor_candidates[ci]) == 0) {
-                        available[n_available++] = lock_sensor_candidates[ci];
-                        break;
-                    }
-                }
-            }
-        }
-        if (sensor_names)
-            uhd_string_vector_free(&sensor_names);
-
-        if (n_available == 0) {
-            if (verbose)
-                fprintf(stderr, "USRP: no lock sensors found on device; "
-                        "skipping PPS wait\n");
-        } else {
-            if (verbose)
-                fprintf(stderr, "USRP: waiting for PPS/reference lock (max %d s)...\n",
-                        max_tries);
-            for (int attempt = 0; attempt < max_tries && !locked; ++attempt) {
-                for (int si = 0; si < n_available && !locked; ++si) {
-                    uhd_sensor_value_handle sv = NULL;
-                    if (uhd_usrp_get_mboard_sensor(usrp, available[si], 0, &sv)
-                            == UHD_ERROR_NONE) {
-                        bool b = false;
-                        uhd_sensor_value_to_bool(sv, &b);
-                        uhd_sensor_value_free(&sv);
-                        if (b) {
-                            locked = true;
-                            if (verbose)
-                                fprintf(stderr, "USRP: %s asserted after %d s\n",
-                                        available[si], attempt);
-                        }
-                    }
-                }
-                if (!locked)
-                    sleep(1);
-            }
-            if (!locked)
-                warnx("USRP: PPS/reference lock timed out; timestamps may be inaccurate");
-        }
+        /* Wait for the external PPS/reference to stabilise before latching time.
+         *
+         * Older code tried to poll uhd_usrp_get_mboard_sensor() for lock
+         * indicators (pps_locked / gps_locked / ref_locked).  On libuhd 4.9.0
+         * this function SIGSEGV's inside the library even for sensor names that
+         * the device itself claims to expose (confirmed on B200 serial 3229C91).
+         * Enumerating the sensor list first and filtering candidates did not help
+         * because the crash happens inside the query, not during name lookup.
+         *
+         * The safe, portable alternative is a fixed wait.  The B200 datasheet
+         * recommends ~100 ms for the reference to lock; we use 2 s to be
+         * conservative on slower systems / long cable runs. */
+        if (verbose)
+            fprintf(stderr, "USRP: waiting 2 s for PPS/reference to stabilise...\n");
+        sleep(2);
 
         /* Set device time at the next PPS edge.  Use current system time + 1 s
          * so that the full-seconds counter sent to set_time_next_pps is the
