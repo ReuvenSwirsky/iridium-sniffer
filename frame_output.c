@@ -210,12 +210,58 @@ void frame_output_print(demod_frame_t *frame)
      * src=hw: timestamp anchored to hardware PPS (--pps-ref / VITA49 hw ts)
      * src=sw: timestamp from clock_gettime(CLOCK_REALTIME) software fallback
      *
+     * bid (burst identifier): a receiver-independent 64-bit tag that lets two
+     * PPS-locked receivers correlate the same-over-the-air burst.  It is a
+     * FNV-1a 64-bit hash of three signal properties that are fixed by the
+     * transmitter:
+     *
+     *   uw_sym  -- unique-word arrival time quantised to the nearest symbol
+     *              boundary (symbol period = 40 000 ns = 1/25 000 s).
+     *              Computed as: round((first_symbol_ns
+     *                                 + preamble_symbols × 40 000) / 40 000)
+     *              Preamble length: 16 symbols DL, 32 symbols UL.
+     *   channel -- nearest Iridium channel index relative to 1 616 MHz base,
+     *              spacing 41 666.667 Hz.  Absorbs ±20 kHz of per-receiver CFO.
+     *   dir     -- 0 = downlink, 1 = uplink.
+     *
+     * Both receivers must be PPS-locked (src=hw) for bid to match.
+     *
      * See TIMING.md for full details on accuracy and the timing chain. */
     if (precise_timing && frame->first_symbol_ns != 0) {
         const char *src = usrp_pps_ref ? "hw" : "sw";
+
+        /* UW absolute time = first preamble symbol + preamble length in ns */
+        int preamble_syms = (frame->direction == DIR_UPLINK)
+            ? 32 : IR_PREAMBLE_LENGTH_SHORT;   /* 32 UL, 16 DL */
+        uint64_t uw_ns = frame->first_symbol_ns
+                         + (uint64_t)preamble_syms * 40000ULL;
+        /* Quantise to nearest symbol index (round by adding half-period) */
+        uint64_t uw_sym = (uw_ns + 20000ULL) / 40000ULL;
+
+        /* Nearest Iridium channel (41 666.667 Hz spacing from 1 616 MHz) */
+        double ch_f = (frame->center_frequency - 1616000000.0) / 41666.667;
+        int64_t ch = (int64_t)(ch_f >= 0.0 ? ch_f + 0.5 : ch_f - 0.5);
+
+        int dir_bit = (frame->direction == DIR_UPLINK) ? 1 : 0;
+
+        /* FNV-1a 64-bit hash over the three fields */
+        uint64_t h = 14695981039346656037ULL;  /* FNV offset basis */
+#define FNV_MIX64(val) do { \
+            uint64_t _v = (uint64_t)(val); \
+            for (int _j = 0; _j < 8; _j++) { \
+                h ^= (_v & 0xFFU); \
+                h *= 1099511628211ULL; \
+                _v >>= 8; \
+            } \
+        } while (0)
+        FNV_MIX64(uw_sym);
+        FNV_MIX64((uint64_t)ch);
+        FNV_MIX64((uint64_t)dir_bit);
+#undef FNV_MIX64
+
         fprintf(stderr, "# TIMING I:%011" PRIu64 " first_symbol_ns=%" PRIu64
-                " src=%s\n",
-                frame->id, frame->first_symbol_ns, src);
+                " src=%s bid=%016" PRIx64 "\n",
+                frame->id, frame->first_symbol_ns, src, h);
     }
 }
 
