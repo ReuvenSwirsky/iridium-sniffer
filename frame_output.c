@@ -220,8 +220,31 @@ void frame_output_print(demod_frame_t *frame)
      *              Computed as: round((first_symbol_ns
      *                                 + preamble_symbols × 40 000) / 40 000)
      *              Preamble length: 16 symbols DL, 32 symbols UL.
-     *   channel -- nearest Iridium channel index relative to 1 616 MHz base,
-     *              spacing 41 666.667 Hz.  Absorbs ±20 kHz of per-receiver CFO.
+     *              Tolerance: ±20 µs.  This comfortably absorbs:
+     *                - PPS clock accuracy (~100 ns)
+     *                - Propagation delay from receiver separation up to ~6 km
+     *                  (6 km / c ≈ 20 µs)
+     *                - Any sub-symbol timing recovery differences between
+     *                  receivers
+     *              Bit errors in the decoded payload are not used here at all.
+     *
+     *   ch2     -- 2-channel bin index relative to 1 616 MHz base.  Each bin
+     *              spans 2 × 41 666.667 Hz = 83 333 Hz, giving ±41 667 Hz
+     *              of frequency tolerance.  This absorbs:
+     *                - SDR oscillator inaccuracy (RTL-SDR: ±20-50 kHz after
+     *                  PLL; HackRF/B200: ±5-20 kHz)
+     *                - Differential Doppler between receivers at different
+     *                  locations (two receivers ~500 km apart on the same
+     *                  Iridium pass differ by ~15-30 kHz; up to ~40 kHz for
+     *                  extreme 1 000+ km separations)
+     *                - PLL residual convergence differences between receivers
+     *              Adjacent channels (41 667 Hz apart) remain distinguishable
+     *              because two physically different channels land in different
+     *              2-channel bins at least half the time; when they share a
+     *              bin, the timing field (uw_sym) still separates simultaneous
+     *              bursts on different channels unless they happen to land in
+     *              the same symbol slot, which is rare.
+     *
      *   dir     -- 0 = downlink, 1 = uplink.
      *
      * Both receivers must be PPS-locked (src=hw) for bid to match.
@@ -238,9 +261,9 @@ void frame_output_print(demod_frame_t *frame)
         /* Quantise to nearest symbol index (round by adding half-period) */
         uint64_t uw_sym = (uw_ns + 20000ULL) / 40000ULL;
 
-        /* Nearest Iridium channel (41 666.667 Hz spacing from 1 616 MHz) */
-        double ch_f = (frame->center_frequency - 1616000000.0) / 41666.667;
-        int64_t ch = (int64_t)(ch_f >= 0.0 ? ch_f + 0.5 : ch_f - 0.5);
+        /* 2-channel bin (83 333 Hz/bin) for ±41 667 Hz Doppler/CFO tolerance */
+        double ch_f = (frame->center_frequency - 1616000000.0) / 83333.333;
+        int64_t ch2 = (int64_t)(ch_f >= 0.0 ? ch_f + 0.5 : ch_f - 0.5);
 
         int dir_bit = (frame->direction == DIR_UPLINK) ? 1 : 0;
 
@@ -255,7 +278,7 @@ void frame_output_print(demod_frame_t *frame)
             } \
         } while (0)
         FNV_MIX64(uw_sym);
-        FNV_MIX64((uint64_t)ch);
+        FNV_MIX64((uint64_t)ch2);
         FNV_MIX64((uint64_t)dir_bit);
 #undef FNV_MIX64
 
