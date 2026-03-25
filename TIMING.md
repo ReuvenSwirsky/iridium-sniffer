@@ -19,10 +19,11 @@ Two options control this:
 The output line includes a `src=` field that identifies the timestamp source:
 
 ```
-# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=hw
-                                                            ^^^^^^
+# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=hw bid=a3f2c1d0e5b6a712
+                                                            ^^^^^^     ^^^^^^^^^^^^^^^^
                                                             hw = hardware PPS
                                                             sw = software clock
+                                                                       see below
 ```
 
 ---
@@ -125,11 +126,11 @@ frame analysis.  It does not change regardless of whether `--timing` or
 ### Absolute timing output (stderr — with `--timing` or `--pps-ref`)
 
 ```
-# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=hw
-            ^^^^^^^^^^^                 ^^^^^^^^^^^^^^^^^^^      ^^
-            Burst ID (matches the      Nanoseconds since         hw = hardware PPS
-            I: field in the RAW line)  Unix epoch (UTC) of       sw = software clock
-                                       the first preamble symbol
+# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=hw bid=a3f2c1d0e5b6a712
+            ^^^^^^^^^^^                 ^^^^^^^^^^^^^^^^^^^      ^^     ^^^^^^^^^^^^^^^^
+            Burst ID (matches the      Nanoseconds since         hw     Cross-receiver
+            I: field in the RAW line)  Unix epoch (UTC) of       sw     burst correlator
+                                       the first preamble symbol         (see below)
 ```
 
 You can correlate the two streams by matching the burst `I:` field:
@@ -143,6 +144,96 @@ iridium-sniffer ... --timing 2>timing.log | iridium-parser.py
 ```
 
 With `--pps-ref` (USRP + hardware PPS) you instead see `src=hw`.
+
+---
+
+## Cross-Receiver Burst Correlation (`bid`)
+
+The `bid` field is a **receiver-independent 64-bit burst identifier** that
+allows two separate receivers, running completely independently, to discover
+that they decoded the same over-the-air Iridium burst.
+
+It is a FNV-1a 64-bit hash of three signal properties determined solely by
+the transmitter — not by anything local to the receiver:
+
+### Input 1 — `uw_sym`: UW arrival time (symbol-quantised)
+
+```
+uw_sym = round((first_symbol_ns + preamble_symbols × 40 000) / 40 000)
+```
+
+This converts the UW arrival time into an **absolute Iridium symbol index**
+(one symbol = 40 000 ns = 1/25 000 s).  Both receivers will compute the
+same integer so long as their PPS-anchored clocks agree to within **± 20 µs**
+(half a symbol period).
+
+| Error source | Magnitude | Within ± 20 µs? |
+|---|---|---|
+| GPSDO absolute accuracy | < 100 ns | ✓ |
+| `set_time_next_pps` quantisation | < 1 sample (100 ns at 10 Msps) | ✓ |
+| UHD USB transfer jitter | 1–5 µs (B-series) | ✓ |
+| Decimated burst-onset granularity | ~4 µs (1 sample at 250 kHz) | ✓ |
+| **Propagation delay from receiver separation** | **~3.3 µs/km** | **✓ up to ~6 km separation** |
+
+For receivers separated by more than ~6 km, the far receiver will see the
+burst arriving up to 20 µs later than the near receiver.  At extreme
+separations (> 6 km) the `uw_sym` values may differ by 1, causing a `bid`
+mismatch.  This is an inherent physical limit of a single symbol-period bin.
+
+### Input 2 — `ch2`: frequency (2-channel bin)
+
+```
+ch2 = round((center_frequency − 1 616 000 000 Hz) / 83 333 Hz)
+```
+
+This maps the measured center frequency into a **2-channel bin** (two Iridium
+channel spacings = 83 333 Hz wide, ± 41 667 Hz per side).  This wide bin
+absorbs all realistic sources of per-receiver frequency error:
+
+| Error source | Magnitude | Within ± 41 667 Hz? |
+|---|---|---|
+| RTL-SDR TCXO inaccuracy (before calibration) | ± 20–50 kHz | ✓ (marginal for cheap dongles) |
+| HackRF / B200 oscillator residual after PLL | ± 5–20 kHz | ✓ |
+| Differential Doppler, 500 km receiver separation | ~ 15–30 kHz | ✓ |
+| Differential Doppler, 1 000+ km separation (extreme) | up to ±40 kHz | ✓ (just) |
+
+Two adjacent Iridium channels (41 667 Hz apart) will occasionally share the
+same `ch2` bin when one sits precisely on a bin boundary; in that case the
+`uw_sym` timing field still separates simultaneous bursts because they arrive
+at different symbol times.
+
+### Input 3 — `dir`: link direction
+
+`dir = 0` for downlink, `dir = 1` for uplink.  A downlink burst and an
+uplink burst on the same frequency and time slot will never share a `bid`.
+
+### Hash algorithm
+
+FNV-1a 64-bit hash (offset basis `14695981039346656037`, prime
+`1099511628211`) over the three 64-bit little-endian inputs in order:
+`uw_sym`, `ch2`, `dir`.
+
+### When `bid` will match across receivers
+
+- Both receivers must be PPS-locked (`src=hw`).  A `src=sw` receiver has
+  ~10 ms timing uncertainty — 250× the ±20 µs symbol bin — so `uw_sym`
+  will almost never agree.
+- Receiver separation must be small enough that propagation delay is
+  < 20 µs, i.e., ≲ 6 km direct path difference.
+- SDR oscillator error must be < 41 667 Hz including Doppler.
+
+### Matching `bid` values across two log files
+
+```bash
+# Extract all bid values from receiver A's timing log
+grep '^# TIMING' rx_a.log | awk '{print $NF}' | grep ^bid= | sort > bids_a.txt
+
+# Extract from receiver B
+grep '^# TIMING' rx_b.log | awk '{print $NF}' | grep ^bid= | sort > bids_b.txt
+
+# Show bursts seen by both
+comm -12 bids_a.txt bids_b.txt
+```
 
 Convert to human-readable UTC in Python:
 ```python
@@ -250,4 +341,4 @@ first_sample_idx = int((first_symbol_ns - start_time_ns) * capture_rate / 1e9)
 | LPF group-delay correction | [burst_downmix.c](burst_downmix.c) `decimate_burst()` | `delay_ns` |
 | First-symbol timestamp | [burst_downmix.c](burst_downmix.c) `burst_downmix_process()` | `frame->first_symbol_ns` |
 | Propagation through QPSK | [qpsk_demod.c](qpsk_demod.c) `qpsk_demod()` | `frame->first_symbol_ns` |
-| TIMING stderr output | [frame_output.c](frame_output.c) `frame_output_print()` | `precise_timing` flag, `src=` qualifier |
+| TIMING stderr output | [frame_output.c](frame_output.c) `frame_output_print()` | `precise_timing` flag, `src=` qualifier, `bid=` hash |
