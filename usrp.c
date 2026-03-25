@@ -192,7 +192,7 @@ uhd_usrp_handle usrp_setup(char *serial) {
                     max_tries);
         for (int attempt = 0; attempt < max_tries && !locked; ++attempt) {
             for (int si = 0; lock_sensors[si] && !locked; ++si) {
-                uhd_sensor_value_handle sv;
+                uhd_sensor_value_handle sv = NULL;
                 if (uhd_usrp_get_mboard_sensor(usrp, lock_sensors[si], 0, &sv)
                         == UHD_ERROR_NONE) {
                     bool b = false;
