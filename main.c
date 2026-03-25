@@ -228,6 +228,12 @@ int clock_source = CLOCK_SRC_INTERNAL;
 int time_source = CLOCK_SRC_INTERNAL;
 /* When 1, wait for PPS lock after USRP setup and set device time at next PPS */
 int usrp_pps_ref = 0;
+/* When 1, emit first_symbol_ns for every decoded frame to stderr.
+ * Works with any timestamp source: hardware-disciplined (usrp_pps_ref, vita49
+ * with embedded timestamps) gives sub-microsecond accuracy; software
+ * clock_gettime(CLOCK_REALTIME) gives ~10 ms accuracy.  The src= field in
+ * the output line indicates which source was used for a given burst. */
+int precise_timing = 0;
 
 /* Threading state */
 volatile sig_atomic_t running = 1;

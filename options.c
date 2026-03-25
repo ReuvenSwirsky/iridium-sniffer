@@ -118,6 +118,7 @@ extern int time_source;
 #ifdef HAVE_UHD
 extern int usrp_pps_ref;
 #endif
+extern int precise_timing;
 
 static void usage(int exitcode) {
     fprintf(stderr,
@@ -188,6 +189,13 @@ static void usage(int exitcode) {
 "    --diagnostic            setup verification mode (suppresses RAW output)\n"
 "    --no-gardner           disable Gardner timing recovery (enabled by default)\n"
 "    --parsed               output parsed IDA lines (pipe to reassembler.py)\n"
+"    --timing               emit first-symbol wall-clock timestamp to stderr for\n"
+"                             every decoded burst (does not affect stdout RAW format):\n"
+"                             \"# TIMING I:NNNNNNNNNNN first_symbol_ns=M src=hw|sw\"\n"
+"                             src=hw when a hardware timestamp is available (--pps-ref,\n"
+"                             VITA 49 with embedded timestamps); src=sw when falling\n"
+"                             back to clock_gettime(CLOCK_REALTIME). See TIMING.md.\n"
+"                             --pps-ref implies --timing automatically.\n"
 "    --acars               decode and display ACARS messages from IDA\n"
 "    --acars-json          output ACARS as JSON (compatible with acars.py)\n"
 "    --acars-udp=HOST:PORT stream ACARS JSON via UDP (repeatable, max 4)\n"
@@ -279,6 +287,7 @@ void parse_options(int argc, char **argv) {
         OPT_SDRPLAY_GAIN,
         OPT_VITA49,
         OPT_PPS_REF,
+        OPT_TIMING,
     };
 
     static const struct option longopts[] = {
@@ -326,6 +335,7 @@ void parse_options(int argc, char **argv) {
         { "sdrplay-gain",   required_argument, NULL, OPT_SDRPLAY_GAIN },
         { "vita49",         optional_argument, NULL, OPT_VITA49 },
         { "pps-ref",        no_argument,       NULL, OPT_PPS_REF },
+        { "timing",         no_argument,       NULL, OPT_TIMING },
         { NULL,             0,                 NULL, 0 }
     };
 
@@ -598,9 +608,14 @@ void parse_options(int argc, char **argv) {
             case OPT_PPS_REF:
 #ifdef HAVE_UHD
                 usrp_pps_ref = 1;
+                precise_timing = 1;  /* --pps-ref implies --timing */
 #else
                 errx(1, "--pps-ref requires UHD (USRP) support");
 #endif
+                break;
+
+            case OPT_TIMING:
+                precise_timing = 1;
                 break;
 
             case OPT_VITA49:

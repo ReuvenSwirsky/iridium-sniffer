@@ -36,8 +36,9 @@
 extern int diagnostic_mode;
 extern int parsed_mode;
 extern int acars_enabled;
+extern int precise_timing;  /* --timing flag: emit first_symbol_ns to stderr */
 #ifdef HAVE_UHD
-extern int usrp_pps_ref;
+extern int usrp_pps_ref;    /* --pps-ref: hardware GPS-disciplined timestamp */
 #else
 static const int usrp_pps_ref = 0;
 #endif
@@ -202,13 +203,19 @@ void frame_output_print(demod_frame_t *frame)
     buf_char('\n');
     buf_flush(!suppress_stdout);
 
-    /* When --pps-ref is active, emit first-symbol absolute timestamp to
-     * stderr so it is completely isolated from the stdout RAW stream.  This
-     * leaves the machine-readable output format unchanged while giving
-     * operators wall-clock burst timing at full hardware timebase precision. */
-    if (usrp_pps_ref && frame->first_symbol_ns != 0) {
-        fprintf(stderr, "# TIMING I:%011" PRIu64 " first_symbol_ns=%" PRIu64 "\n",
-                frame->id, frame->first_symbol_ns);
+    /* When --timing (or --pps-ref which implies it) is active, emit the
+     * first-symbol absolute wall-clock timestamp to stderr.  This is kept
+     * separate from stdout so the machine-readable RAW format is unchanged.
+     *
+     * src=hw: timestamp anchored to hardware PPS (--pps-ref / VITA49 hw ts)
+     * src=sw: timestamp from clock_gettime(CLOCK_REALTIME) software fallback
+     *
+     * See TIMING.md for full details on accuracy and the timing chain. */
+    if (precise_timing && frame->first_symbol_ns != 0) {
+        const char *src = usrp_pps_ref ? "hw" : "sw";
+        fprintf(stderr, "# TIMING I:%011" PRIu64 " first_symbol_ns=%" PRIu64
+                " src=%s\n",
+                frame->id, frame->first_symbol_ns, src);
     }
 }
 

@@ -154,6 +154,69 @@ RAW: i-10-t1 0000442.4080 1624960925 N:10.77-71.83 I:00000003560  50% 0.11738 17
 
 This format is consumed directly by [iridium-toolkit](https://github.com/muccc/iridium-toolkit) for higher-layer decoding.
 
+## Burst Timing Data Flow
+
+When `--timing` (or `--pps-ref` which implies it) is enabled, the **absolute
+wall-clock time of the first preamble symbol** of each decoded burst is emitted
+to stderr as a separate line that does not disturb the stdout RAW format:
+
+```
+# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=hw
+```
+
+`src=hw` when a hardware GPS-disciplined timestamp is available (USRP + `--pps-ref`);
+`src=sw` when falling back to `clock_gettime(CLOCK_REALTIME)`.
+
+### Timing propagation through the pipeline
+
+The timestamp travels as a single `uint64_t` nanosecond value through every
+stage and is refined at each step:
+
+```
+burst_detector_feed[_cf32]()          burst_detect.c
+  d->start_time_ns                    ← hw_timestamp_ns from first SDR buffer,
+                                         or clock_gettime(CLOCK_REALTIME)
+  ↓
+emit_gone_bursts()
+  burst_data_t::start_time_ns         ← copy of d->start_time_ns (shared origin)
+  burst_data_t::info.start            ← absolute sample index of FFT-detected burst onset
+  ↓
+burst_downmix_process()               burst_downmix.c
+  timestamp                           ← start_time_ns + info.start / sample_rate * 1e9
+  decimate_burst()
+    timestamp += (ntaps/2) / sample_rate * 1e9
+                                      ← corrects forward for LPF group delay
+  find_burst_start() → start          ← decimated sample index of burst energy onset
+  frame->timestamp                    ← timestamp + start / output_rate * 1e9
+  correlate_sync() → uw_start         ← decimated sample index of unique word start
+  preamble_start = uw_start − preamble_symbols × sps
+  frame->first_symbol_ns              ← frame->timestamp
+                                         + preamble_start / output_rate * 1e9
+  ↓
+qpsk_demod()                          qpsk_demod.c
+  demod_frame_t::first_symbol_ns      ← copied unchanged from downmix_frame_t
+  ↓
+frame_output_print()                  frame_output.c
+  stdout:  RAW: line (relative ms timestamp, format unchanged)
+  stderr:  # TIMING ... src=hw|sw     ← only when --timing or --pps-ref active
+```
+
+### Struct fields carrying timing
+
+| Struct | Field | Description |
+|--------|-------|-------------|
+| `burst_detector_t` | `start_time_ns` | Wall-clock ns at sample index 0 |
+| `burst_detector_t` | `pending_hw_ts` | Staging area for hardware timestamp from SDR thread |
+| `burst_data_t` | `start_time_ns` | Copied from detector; shared by all bursts in a session |
+| `burst_data_t::burst_info_t` | `start` | Absolute sample index of burst onset (capture rate) |
+| `downmix_frame_t` | `timestamp` | ns of burst energy onset after decimation + LPF correction |
+| `downmix_frame_t` | `first_symbol_ns` | ns of **first preamble symbol** after sync-word correlation |
+| `demod_frame_t` | `timestamp` | Same as downmix; relative base for RAW output |
+| `demod_frame_t` | `first_symbol_ns` | Same as downmix; emitted to stderr when `--timing` active |
+
+See [TIMING.md](TIMING.md) for accuracy figures, worked examples, and the
+complete conversion formula back to capture-rate sample indices.
+
 ## Threading Design Decisions
 
 **Why a single burst detector thread?** The FFT burst detector maintains sequential state: noise floor history, active burst list, ring buffer. Parallelizing it would require complex synchronization with no benefit since FFT computation dominates and is already vectorized.

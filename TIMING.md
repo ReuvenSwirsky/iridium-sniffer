@@ -1,42 +1,53 @@
-# Precise Packet Timing with a PPS / 10 MHz Reference
+# Precise Packet Timing
 
 ## Overview
 
-`iridium-sniffer` supports locking timestamps to a hardware PPS pulse so that
-every detected Iridium burst is time-stamped with its **first preamble symbol's
-absolute wall-clock time**, traceable to UTC.  The RAW output format printed to
-stdout is **unchanged** — downstream tools (`iridium-parser.py`, etc.) continue
-to work without modification.  Absolute timing information is emitted separately
-to **stderr**.
+`iridium-sniffer` can emit the **absolute wall-clock time of the first preamble
+symbol** of every decoded Iridium burst to stderr, leaving the stdout RAW
+format completely unchanged so downstream tools (`iridium-parser.py`, etc.)
+continue to work without modification.
+
+Two options control this:
+
+| Option | Works with | Timestamp accuracy |
+|--------|-----------|--------------------|
+| `--timing` | Any SDR, IQ file, VITA 49, ZMQ SUB | ~10 ms (software `clock_gettime`) |
+| `--pps-ref` | USRP only (requires `--clock-source` + `--time-source=external/gpsdo`) | < 10 µs (hardware GPS-disciplined PPS) |
+
+`--pps-ref` implies `--timing` automatically.
+
+The output line includes a `src=` field that identifies the timestamp source:
+
+```
+# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=hw
+                                                            ^^^^^^
+                                                            hw = hardware PPS
+                                                            sw = software clock
+```
 
 ---
 
-## Prerequisites
+## Quick Start
 
-| Hardware | Required |
-|---|---|
-| USRP with an external 10 MHz reference input | clock accuracy / phase stability |
-| External PPS source (GPS receiver, GPSDO, or rubidium oscillator) connected to the USRP PPS input | absolute time-of-day anchoring |
-| Matching `--clock-source` and `--time-source` CLI flags | tells the driver to use those inputs |
+### Any SDR or IQ file — software clock (~10 ms accuracy)
 
-A GPSDO (e.g. Jackson Labs LC_XO or SBG GNSS-disciplined oscillators) provides
-both references in a single unit.
+```bash
+iridium-sniffer -l -i soapy-0 --timing 2>timing.log | iridium-parser.py
+```
 
----
-
-## How to Enable Precise Timing
+### USRP with GPS-disciplined PPS — hardware accuracy (< 10 µs)
 
 ```bash
 iridium-sniffer \
     -i usrp-B210-<SERIAL> \
-    --clock-source=external \   # 10 MHz reference
-    --time-source=external \    # PPS
-    --pps-ref \                 # enable lock-wait + time-set
+    --clock-source=external \
+    --time-source=external \
+    --pps-ref \
     -c 1622000000 \
-    -r 10000000 | iridium-parser.py
+    -r 10000000 2>timing.log | iridium-parser.py
 ```
 
-On startup the program will:
+With `--pps-ref` the program will:
 1. Configure the USRP clock and time sources to the external inputs.
 2. Poll the USRP sensors (`pps_locked`, `gps_locked`, or `ref_locked`) once per
    second for up to 30 seconds until lock is confirmed.
@@ -52,44 +63,46 @@ reject it with an error message if UHD support is not compiled in.
 ## Timing Chain — Stage by Stage
 
 ```
-PPS pulse → USRP hardware latches sample counter to wall-clock second
+Timestamp origin (one of the following):
+  hw_timestamp_ns   USRP+PPS: uhd_rx_metadata_time_spec() at start of each USB buffer
+                    VITA 49: embedded timestamp from VRT packet header (future)
+  clock_gettime()   all other inputs: software wall-clock at first buffer receipt
                │
-               ▼
-uhd_rx_streamer_recv() → uhd_rx_metadata_time_spec()
-   returns (full_secs, frac_secs) for the FIRST sample of each USB buffer
+               ▼  sample_buf_t::hw_timestamp_ns  (ns since Unix epoch, or 0=none)
                │
-               ▼  sample_buf_t::hw_timestamp_ns  (ns since Unix epoch)
-               │
-               ▼  burst_detect.c  burst_detector_feed()
-   start_time_ns = hw_timestamp_ns of the very first buffer received
-   (or clock_gettime(CLOCK_REALTIME) when no hardware timestamp is available)
+               ▼  burst_detect.c  burst_detector_feed() / burst_detector_feed_cf32()
+  start_time_ns = hw_timestamp_ns if non-zero, else clock_gettime(CLOCK_REALTIME)
+  (set once on the very first call; held in burst_detector_t::start_time_ns)
                │
                ▼  burst detected at absolute sample index  burst.info.start
                │  (granularity = one FFT frame = fft_size / sample_rate ≈ 0.82 ms)
                │
-   burst_data_t::start_time_ns  = start_time_ns
-   burst_data_t::info.start     = sample index (at capture sample rate)
+  burst_data_t::start_time_ns  = d->start_time_ns      ← origin tag follows burst
+  burst_data_t::info.start     = sample index (at capture sample rate)
                │
                ▼  burst_downmix.c  burst_downmix_process()
-   timestamp = start_time_ns + info.start / sample_rate * 1e9
-   decimate_burst() adjusts timestamp for LPF group delay:
-       timestamp += (ntaps/2) / sample_rate * 1e9
-   find_burst_start() locates burst energy onset in the decimated frame
-       → 'start' index (at 250 kHz output rate)
-   frame->timestamp = timestamp + start / 250000 * 1e9   ← burst energy onset
+  timestamp = start_time_ns + info.start / sample_rate * 1e9
+  decimate_burst() adjusts timestamp for LPF group delay:
+      timestamp += (ntaps/2) / sample_rate * 1e9
+  find_burst_start() locates burst energy onset in the decimated frame
+      → 'start' index (at 250 kHz output rate)
+  frame->timestamp = timestamp + start / 250000 * 1e9   ← burst energy onset
                │
                ▼  correlate_sync() finds the unique word (UW) via FFT correlation
-   uw_start  = sample index of UW first sample in the decimated frame
-   preamble_start = uw_start − preamble_symbols × samples_per_symbol
-   frame->first_symbol_ns = frame->timestamp
-                           + preamble_start / 250000 * 1e9
+  uw_start  = sample index of UW first sample in the decimated frame
+  preamble_start = uw_start − preamble_symbols × samples_per_symbol
+  frame->first_symbol_ns = (start_time_ns != 0)
+      ? frame->timestamp + preamble_start / 250000 * 1e9
+      : 0  ← always non-zero in practice (start_time_ns set from clock_gettime)
                │
                ▼  qpsk_demod.c  copies first_symbol_ns unchanged
                │
                ▼  frame_output.c  frame_output_print()
-   stdout:  unchanged RAW: line with relative timestamp in milliseconds
-   stderr:  "# TIMING I:NNNNNNNNNNN first_symbol_ns=MMMMMMMMMMMMMMMM"
-            (only when --pps-ref is active and a hw timestamp was available)
+  stdout:  unchanged RAW: line with relative timestamp in milliseconds
+  stderr:  "# TIMING I:NNNNNNNNNNN first_symbol_ns=MMMMMMMMMMMMMMMM src=hw|sw"
+           src=hw when usrp_pps_ref is set (hardware GPS-disciplined PPS)
+           src=sw when falling back to clock_gettime(CLOCK_REALTIME)
+           emitted when --timing (or --pps-ref) is active and first_symbol_ns != 0
 ```
 
 ---
@@ -106,26 +119,30 @@ RAW: i-1711234567-t1 000000.0000 1622025000 N:22.50 -3.20 I:00000000010 100% 0.9
 ```
 
 This timestamp is **relative** and suitable for iridium-toolkit's differential
-frame analysis.  It does not change regardless of whether `--pps-ref` is used.
+frame analysis.  It does not change regardless of whether `--timing` or
+`--pps-ref` is used.
 
-### Absolute timing output (stderr — only with `--pps-ref`)
+### Absolute timing output (stderr — with `--timing` or `--pps-ref`)
 
 ```
-# TIMING I:00000000010 first_symbol_ns=1711234567123456789
-            ^^^^^^^^^^^                 ^^^^^^^^^^^^^^^^^^^
-            Burst ID (matches the      Nanoseconds since Unix epoch (UTC)
-            I: field in the RAW line)  of the first preamble symbol
+# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=hw
+            ^^^^^^^^^^^                 ^^^^^^^^^^^^^^^^^^^      ^^
+            Burst ID (matches the      Nanoseconds since         hw = hardware PPS
+            I: field in the RAW line)  Unix epoch (UTC) of       sw = software clock
+                                       the first preamble symbol
 ```
 
 You can correlate the two streams by matching the burst `I:` field:
 
 ```bash
-iridium-sniffer ... --pps-ref 2>timing.log | iridium-parser.py
+iridium-sniffer ... --timing 2>timing.log | iridium-parser.py
 
 # in timing.log:
-# TIMING I:00000000010 first_symbol_ns=1711234567123456789
-# TIMING I:00000000020 first_symbol_ns=1711234567145678901
+# TIMING I:00000000010 first_symbol_ns=1711234567123456789 src=sw
+# TIMING I:00000000020 first_symbol_ns=1711234567145678901 src=sw
 ```
+
+With `--pps-ref` (USRP + hardware PPS) you instead see `src=hw`.
 
 Convert to human-readable UTC in Python:
 ```python
@@ -167,22 +184,25 @@ Both DL and UL frames follow the same structure.  The UW starts at
 
 ## Achievable Precision
 
-| Source of error | Magnitude |
-|---|---|
-| USRP + GPSDO (e.g. Jackson Labs LC_XO) | < 50 ns absolute, < 10 ns jitter |
-| USRP + external 10 MHz + GPS PPS | < 100 ns absolute |
-| `set_time_next_pps` quantization | < 1 sample period (100 ns at 10 Msps) |
-| UHD USB/PCIe transfer latency jitter | 1–5 µs (B-series), < 1 µs (X/N-series) |
-| FFT burst-start detection granularity | ~0.82 ms (1 FFT frame at 10 Msps / 8192) |
-| Decimated burst-start refinement | ~4 µs (1 decimated sample at 250 kHz) |
-| **Sync-word correlation peak** | **< 1 decimated sample ≈ 4 µs** |
-| RRC matched filter group delay | accounted for in `decimate_burst()` |
+| Source of error | With `--timing` (sw) | With `--pps-ref` (hw) |
+|---|---|---|
+| Timestamp origin | `clock_gettime(CLOCK_REALTIME)` on first buffer | USRP UHD hardware timespec per USB buffer |
+| Absolute accuracy | ~10 ms (OS scheduler jitter) | < 100 ns with GPSDO |
+| USRP + GPSDO (e.g. Jackson Labs LC_XO) | N/A | < 50 ns absolute, < 10 ns jitter |
+| `set_time_next_pps` quantization | N/A | < 1 sample period (100 ns at 10 Msps) |
+| UHD USB/PCIe transfer latency jitter | N/A | 1–5 µs (B-series), < 1 µs (X/N-series) |
+| FFT burst-start detection granularity | ~0.82 ms (1 FFT frame at 10 Msps / 8192) | ~0.82 ms |
+| Decimated burst-start refinement | ~4 µs (1 decimated sample at 250 kHz) | ~4 µs |
+| **Sync-word correlation peak** | **< 1 decimated sample ≈ 4 µs** | **< 4 µs** |
+| RRC matched filter group delay | accounted for in `decimate_burst()` | accounted for |
 
-With a well-disciplined GPSDO the **combined absolute uncertainty** of
-`first_symbol_ns` is typically **< 10 µs** at 10 Msps, dominated by the
-decimated-domain burst-onset detection.  Relative timing *between successive
-bursts* (same session) is significantly better because the `start_time_ns`
-origin is shared.
+With a well-disciplined GPSDO (`--pps-ref`) the **combined absolute uncertainty**
+is typically **< 10 µs**, dominated by decimated-domain burst-onset detection.
+
+With software clock (`--timing` only) the absolute accuracy is dominated by
+OS scheduling jitter (~1–10 ms), but **relative timing between successive
+bursts within the same session** is much better because the `start_time_ns`
+origin is a single `clock_gettime()` call shared by all subsequent bursts.
 
 ---
 
@@ -230,4 +250,4 @@ first_sample_idx = int((first_symbol_ns - start_time_ns) * capture_rate / 1e9)
 | LPF group-delay correction | [burst_downmix.c](burst_downmix.c) `decimate_burst()` | `delay_ns` |
 | First-symbol timestamp | [burst_downmix.c](burst_downmix.c) `burst_downmix_process()` | `frame->first_symbol_ns` |
 | Propagation through QPSK | [qpsk_demod.c](qpsk_demod.c) `qpsk_demod()` | `frame->first_symbol_ns` |
-| TIMING stderr output | [frame_output.c](frame_output.c) `frame_output_print()` | `usrp_pps_ref` guard |
+| TIMING stderr output | [frame_output.c](frame_output.c) `frame_output_print()` | `precise_timing` flag, `src=` qualifier |
