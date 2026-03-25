@@ -232,6 +232,24 @@ uhd_usrp_handle usrp_setup(char *serial) {
 
     if ((error = uhd_usrp_set_rx_rate(usrp, samp_rate, 0)) != UHD_ERROR_NONE)
         errx(1, "Unable to set USRP sample rate: %u", error);
+
+    /* Read back the rate UHD actually committed to (may differ from requested).
+     * All downstream buffers are sized from samp_rate, so this MUST be updated
+     * before burst_detector_create() or any other sizing call is made.
+     * Mismatch (e.g. B200 snapping 10 MHz -> 16 MHz) causes heap corruption. */
+    {
+        double actual_rate = 0;
+        if (uhd_usrp_get_rx_rate(usrp, 0, &actual_rate) == UHD_ERROR_NONE
+                && actual_rate > 0) {
+            if (actual_rate != samp_rate) {
+                fprintf(stderr, "USRP: requested %.6g MHz, got %.6g MHz — "
+                        "updating samp_rate\n",
+                        samp_rate / 1e6, actual_rate / 1e6);
+                samp_rate = actual_rate;
+            }
+        }
+    }
+
     if ((error = uhd_usrp_set_rx_gain(usrp, (double)usrp_gain_val, 0, "")) != UHD_ERROR_NONE)
         errx(1, "Unable to set USRP gain: %u", error);
     if ((error = uhd_usrp_set_rx_freq(usrp, &tune_request, 0, &tune_result)) != UHD_ERROR_NONE)
