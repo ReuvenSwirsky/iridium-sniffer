@@ -20,7 +20,7 @@ Native GSMTAP output (`--gsmtap`) sends decoded IDA (Iridium Data) frames direct
 - Native GSMTAP/LAPDm output to Wireshark (`--gsmtap`) for IDA frame analysis
 - Built-in web map with live satellite and ring alert visualization
 - Doppler-based receiver positioning from decoded satellite signals (`--position`)
-- AVX2 and SSE4.2 SIMD kernels with automatic runtime detection (`--simd`)
+- AVX2, SSE4.2, and NEON SIMD kernels with automatic runtime detection (`--simd`)
 - GPU-accelerated FFT burst detection (OpenCL or Vulkan)
 - ZMQ PUB/SUB output (`--zmq`) for multi-consumer iridium-toolkit compatibility
 - ZMQ SUB and VITA 49 (VRT) network IQ input for remote SDR and distributed setups
@@ -219,7 +219,7 @@ At 18 dB (gr-iridium's default), burst detection counts are nearly identical. Th
 
 **A note on live ok% rates:** In live SDR capture, you may see ok\_avg of 35-50% with iridium-sniffer compared to 70-80% shown in gr-iridium guides. This is expected and not a problem. iridium-sniffer uses a lower default detection threshold (16 dB vs gr-iridium's 18 dB), which catches more weak bursts at the noise floor. These marginal detections lower the ok percentage but increase the total number of successfully decoded frames. The ok% statistic measures what fraction of detected bursts decode -- not how many frames you are actually recovering. What matters is decoded frames per second, and iridium-sniffer typically recovers more usable data than gr-iridium despite the lower ok% figure.
 
-**Processing speed (60s cf32 file, i7-11800H):**
+**x64 Processing speed (60s cf32 file, i7-11800H):**
 
 | Configuration | Wall time | CPU time | Realtime factor |
 |---------------|-----------|----------|-----------------|
@@ -229,7 +229,14 @@ At 18 dB (gr-iridium's default), burst detection counts are nearly identical. Th
 | Scalar + GPU | 16.1s | 42.6s | 3.7x |
 | Scalar only (baseline) | 13.0s | 40.6s | 4.6x |
 
-Three SIMD tiers are available: AVX2+FMA (256-bit), SSE4.2 (128-bit), and scalar. The appropriate tier is selected automatically at startup via CPUID. Use `--simd=MODE` to force a specific path (auto/avx2/sse42/scalar) for testing or debugging. AVX2 provides ~1.9x CPU time reduction over scalar; SSE4.2 provides ~1.5x, which helps on CPUs without AVX2 (e.g. Intel Celeron J4105). GPU acceleration adds startup overhead for files this size but becomes beneficial for longer recordings and continuous live capture.
+**ARM NEON performance (Apple M3 Max, 12 GB 10-min ci8 recording):**
+
+| Configuration | CPU Time (user) | Wall Time | Realtime Factor |
+|---------------|-----------------|-----------|------------------|
+| NEON (default on AArch64) | 647.8s | 2:31.98 | **3.9x** |
+| Scalar | 995.2s | 3:58.02 | 2.5x |
+
+Four SIMD tiers are available: AVX2+FMA (256-bit, x86), SSE4.2 (128-bit, x86), NEON (128-bit, AArch64), and scalar. On x86 the tier is selected at runtime via CPUID; on AArch64 NEON is the default. Use `--simd=MODE` to force a specific path (`auto`/`avx2`/`sse42`/`neon`/`scalar`) for testing or debugging. AVX2 provides ~1.9x CPU time reduction over scalar; SSE4.2 provides ~1.5x (helps on older Intel Celeron/Atom); NEON provides ~1.54x on Apple Silicon. GPU acceleration adds startup overhead for files this size but becomes beneficial for longer recordings and continuous live capture.
 
 All SIMD configurations produce identical demodulated output (frame count, bit content). GPU vs CPU may differ by a few frames due to floating-point rounding in the burst detection FFT.
 
@@ -905,7 +912,7 @@ Output:
     --save-bursts=DIR       save IQ samples of decoded bursts to directory
     --diagnostic            setup verification mode (suppresses RAW output)
     --no-gardner            disable Gardner timing recovery (enabled by default)
-    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, scalar
+    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar
     --no-simd               alias for --simd=scalar
     -v, --verbose           verbose output to stderr
     -h, --help              show this help

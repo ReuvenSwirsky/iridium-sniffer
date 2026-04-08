@@ -12,6 +12,17 @@ if(UNIX AND NOT APPLE)
   endif()
 endif()
 
+# Include paths for MacOS/Homebrew
+if(APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|ARM|aarch64|AARCH64")
+        link_directories(/opt/homebrew/lib)
+        include_directories(/opt/homebrew/include)
+    else()
+        link_directories(/usr/local/lib)
+        include_directories(/usr/local/include)
+    endif()
+endif()
+
 set(CMAKE_C_FLAGS_DEBUG "-ggdb3 -g3 -O0 -fsanitize=address")
 set(CMAKE_C_FLAGS_MINSIZEREL "-Os")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -ggdb3 -g3")
@@ -126,8 +137,10 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/waypoint_db.c
 )
 
-# SIMD kernels (x86 only, compiled with specific ISA flags, runtime-detected)
+# SIMD kernels — platform-specific, runtime-detected
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|x86|i[3-6]86")
+    # x86: SSE4.2 and AVX2+FMA tiers, each compiled with their ISA flags.
+    # simd_init() probes CPUID at startup and selects the best available tier.
     set_source_files_properties(${PROJECT_SOURCE_DIR}/simd_sse42.c
         PROPERTIES COMPILE_FLAGS "-msse4.2")
     set_source_files_properties(${PROJECT_SOURCE_DIR}/simd_avx2.c
@@ -135,9 +148,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|x86|i[3-6]86")
     list(APPEND SOURCES
         ${PROJECT_SOURCE_DIR}/simd_sse42.c
         ${PROJECT_SOURCE_DIR}/simd_avx2.c)
-    message(STATUS "SIMD: SSE4.2 + AVX2 kernels enabled (runtime-detected)")
+    message(STATUS "SIMD: SSE4.2 + AVX2+FMA kernels enabled (runtime-detected)")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|ARM|aarch64|AARCH64")
+    # AArch64: NEON is part of the base ISA, always present.
+    # No extra compile flags required; <arm_neon.h> is unconditionally available.
+    list(APPEND SOURCES 
+        ${PROJECT_SOURCE_DIR}/simd_neon.c)
+    message(STATUS "SIMD: NEON kernels enabled (AArch64)")
 else()
-    message(STATUS "SIMD: scalar only (non-x86 platform)")
+    message(STATUS "SIMD: scalar only (unrecognised platform)")
 endif()
 
 # SDR backends

@@ -166,7 +166,7 @@ static void usage(int exitcode) {
 "Detection options:\n"
 "    -d, --threshold=DB      burst detection threshold in dB (default: 16.0)\n"
 "    --no-gpu                disable GPU acceleration (use CPU FFTW)\n"
-"    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, scalar\n"
+"    --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar\n"
 "    --no-simd               alias for --simd=scalar\n"
 "    --chase[=N]             enable Chase soft-decision BCH decoder (experimental)\n"
 "                             N = flip-bits count, 0-7 (default 5 = 31 combos).\n"
@@ -458,10 +458,12 @@ void parse_options(int argc, char **argv) {
                     simd_mode = SIMD_AVX2;
                 else if (strcmp(optarg, "sse42") == 0 || strcmp(optarg, "sse4.2") == 0)
                     simd_mode = SIMD_SSE42;
+                else if (strcmp(optarg, "neon") == 0)
+                    simd_mode = SIMD_NEON;
                 else if (strcmp(optarg, "scalar") == 0 || strcmp(optarg, "none") == 0)
                     simd_mode = SIMD_SCALAR;
                 else
-                    errx(1, "Unknown --simd mode '%s'. Use auto, avx2, sse42, or scalar.",
+                    errx(1, "Unknown --simd mode '%s'. Use auto, avx2, sse42, neon, or scalar.",
                          optarg);
                 break;
             case OPT_CHASE:

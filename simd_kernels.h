@@ -133,11 +133,38 @@ float generic_max_float(const float *in, int n);
 void generic_csquare_window(const float complex *in, const float *window,
                             float complex *out, int n);
 
+/* ---- ARM NEON implementations (AArch64 only) ---- */
+#if defined(__aarch64__) || defined(_M_ARM64)
+
+void neon_fir_ccf(const float *taps, int ntaps,
+                  const float complex *in, float complex *out, int n);
+void neon_fir_ccf_dec(const float *taps, int ntaps,
+                      const float complex *in, float complex *out,
+                      int n_out, int decimation);
+void neon_fir_fff(const float *taps, int ntaps,
+                  const float *in, float *out, int n);
+void neon_window_cf(const float complex *samples, const float *window,
+                    float complex *out, int n);
+void neon_fftshift_mag(const float complex *fft_out,
+                       float *mag_shifted, int fft_size);
+void neon_baseline_update(float *sum, const float *old_hist,
+                          const float *new_mag, int n);
+void neon_relative_mag(const float *mag, const float *baseline,
+                       float *out, int n);
+void neon_convert_i8_cf(const int8_t *iq, float complex *out, size_t n);
+void neon_mag_squared(const float complex *in, float *out, int n);
+float neon_max_float(const float *in, int n);
+void neon_csquare_window(const float complex *in, const float *window,
+                         float complex *out, int n);
+
+#endif /* __aarch64__ || _M_ARM64 */
+
 /* ---- SIMD mode selection ---- */
 typedef enum {
     SIMD_AUTO = 0,
     SIMD_AVX2,
     SIMD_SSE42,
+    SIMD_NEON,
     SIMD_SCALAR,
 } simd_mode_t;
 

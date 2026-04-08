@@ -259,6 +259,7 @@ All three produce equivalent RAW output (2500-2577 lines). Minor variations are 
 - [x] Phase 13: SIMD optimization (AVX2+FMA kernels, 1.78x CPU speedup)
 - [x] Phase 14: Detection threshold optimization (18 dB → 16 dB, +6.6% valid frames)
 - [x] Phase 15: SSE4.2 SIMD tier (three-tier dispatch: AVX2 > SSE4.2 > scalar, `--simd=MODE`)
+- [x] Phase 16: ARM NEON SIMD tier (AArch64 parity with x86, 1.54x CPU speedup on Apple M3 Max)
 
 ## Test Verification
 
@@ -655,15 +656,17 @@ Profiling the CPU-intensive DSP pipeline revealed that FIR filtering, magnitude 
 
 ### Three-Tier Dispatch
 
-One binary works on all x86_64 CPUs. At startup, `simd_init(simd_mode)` probes CPU capabilities via `__builtin_cpu_supports()` and selects the highest available tier via function pointers:
+One binary works on all x86_64 CPUs. At startup, `simd_init(simd_mode)` probes CPU capabilities via `__builtin_cpu_supports()` and selects the highest available tier via function pointers.  
+Apple Silicon and other ARM processors will utilize NEON extensions by default, and optionally fall back to Scalar if manually directed.
 
 | Tier | ISA | Register Width | Floats/Op | Minimum CPU | Speedup |
 |------|-----|---------------|-----------|-------------|---------|
 | AVX2+FMA | AVX2, FMA3 | 256-bit | 8 | Intel Haswell (2013) / AMD Excavator (2015) | ~1.9x |
 | SSE4.2 | SSE4.2 | 128-bit | 4 | Intel Nehalem (2008) / AMD Bulldozer (2011) | ~1.3-1.5x |
-| Scalar | C99 | N/A | 1 | Any x86_64 | 1.0x |
+| NEON | AArch64 base ISA | 128-bit | 4 | Any AArch64 (Cortex-A53+, Apple M-series) | ~1.5x |
+| Scalar | C99 | N/A | 1 | Any | 1.0x |
 
-The `--simd=MODE` flag overrides auto-detection (`auto`, `avx2`, `sse42`, `scalar`). If a forced mode is unavailable, dispatch falls back to the next available tier with a warning on stderr. `--no-simd` is retained as an alias for `--simd=scalar`.
+The `--simd=MODE` flag overrides auto-detection (`auto`, `avx2`, `sse42`, `neon` (arm), `scalar`). If a forced mode is unavailable, dispatch falls back to the next available tier with a warning on stderr. `--no-simd` is retained as an alias for `--simd=scalar`.
 
 ### 11 SIMD Kernels
 
@@ -733,9 +736,29 @@ All three SIMD tiers produce identical decoded bits (same frames, same demodulat
 
 **Why not VOLK?** VOLK is a heavy dependency (5000+ lines, build system integration). These 11 kernels are ~1000 lines of intrinsics across two tiers with zero external dependencies. For a standalone tool, less is more.
 
+### ARM NEON (AArch64)
+
+NEON is the SIMD extension for AArch64. Unlike x86 where SSE/AVX are optional extensions requiring CPUID checks, **NEON is mandatory** on AArch64 — it is part of the base ISA. Every AArch64 core (Cortex-A53, Cortex-A72, Apple Silicon, etc...) has NEON.
+
+- No compile flags needed. `<arm_neon.h>` is included and the compiler emits NEON instructions by default on AArch64. CMakeLists.txt requires no `COMPILE_FLAGS` property.
+
+At 10 MHz, 10 million int8 IQ pairs per second must be sign-extended and scaled to float. The NEON path loads 16 bytes, performs a three-level sign-extension chain (int8→int16→int32), converts to float, and multiplies by 1/128 — processing 8 complex outputs per iteration with no branches. Equivalent vectorization width to the AVX2 tier.
+
+#### NEON Benchmark Results
+
+**Test:** `~/irid.iq` — 12 GB, 10 MHz ci8, 10 minutes of data; Apple M3 Max
+
+| Configuration | CPU Time (user) | Wall Time | Realtime Factor | CPU Speedup |
+|---------------|-----------------|-----------|-----------------|-------------|
+| NEON (default) | 647.8s | 2:31.98 | **3.9x** | **1.54x** |
+| Scalar | 995.2s | 3:58.02 | 2.5x | 1.0x |
+
+- CPU time reduction: **34.9%** (995.2s → 647.8s)
+- Wall time reduction: **36.2%** (3:58 → 2:32), driven by CPU-bound DSP throughput
+- CPU utilization virtually identical (432% vs 422%), confirming no change in thread-level parallelism
+
 ### Known Limitations
 
-- **x86_64 only** -- ARM NEON path not implemented (scalar fallback works fine)
 - **No AVX-512** -- Would require separate compilation unit and detection; ~1.5-2x speedup over AVX2 not worth the maintenance burden for <5% of user base
 
 ## Detection Threshold Optimization (Phase 14)

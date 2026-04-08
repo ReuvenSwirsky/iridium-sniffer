@@ -45,6 +45,23 @@ static void set_scalar(void) {
     fprintf(stderr, "iridium-sniffer: using scalar kernels\n");
 }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+static void set_neon(void) {
+    simd_fir_ccf         = neon_fir_ccf;
+    simd_fir_ccf_dec     = neon_fir_ccf_dec;
+    simd_fir_fff         = neon_fir_fff;
+    simd_window_cf       = neon_window_cf;
+    simd_fftshift_mag    = neon_fftshift_mag;
+    simd_baseline_update = neon_baseline_update;
+    simd_relative_mag    = neon_relative_mag;
+    simd_convert_i8_cf   = neon_convert_i8_cf;
+    simd_mag_squared     = neon_mag_squared;
+    simd_max_float       = neon_max_float;
+    simd_csquare_window  = neon_csquare_window;
+    fprintf(stderr, "iridium-sniffer: using NEON SIMD kernels\n");
+}
+#endif
+
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 static void set_sse42(void) {
     simd_fir_ccf        = sse42_fir_ccf;
@@ -109,6 +126,15 @@ void simd_init(int mode) {
         if (cpu_has_sse42())    { set_sse42(); return; }
         set_scalar();
         return;
+    }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    /* NEON is mandatory on AArch64 — part of the base ISA, always present.
+     * Honour explicit --simd=scalar / --no-simd overrides only. */
+    if ((simd_mode_t)mode == SIMD_SCALAR) {
+        fprintf(stderr, "iridium-sniffer: using scalar kernels (forced)\n");
+        set_scalar();
+    } else {
+        set_neon();
     }
 #else
     (void)mode;
