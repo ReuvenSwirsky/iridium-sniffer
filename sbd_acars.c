@@ -49,6 +49,7 @@ int acars_json = 0;
 extern int acars_enabled;
 extern int web_enabled;
 extern int basestation_enabled;
+extern int basestation_beam;
 static const char *station = NULL;
 
 /* Beam cache lookup from main.c -- provides approximate aircraft position
@@ -981,7 +982,7 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                                      pos_sat, pos_beam, timestamp, frequency,
                                      adsc_alt, adsc_pos,
                                      oooi_str[0] ? oooi_str : NULL);
-                if (basestation_enabled && adsc_pos)
+                if (basestation_enabled && (adsc_pos || basestation_beam))
                     basestation_send_position(tail, flt, pos_lat, pos_lon,
                                               adsc_alt, timestamp);
             }
@@ -1451,9 +1452,10 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                     web_map_add_aircraft(reg_f, "", bc_lat, bc_lon,
                                          bc_sat, bc_beam, timestamp, frequency,
                                          -99999, 0, NULL);
-                    /* Beam estimates NOT sent via basestation -- ~200 km
-                     * accuracy would place aircraft at beam center, not
-                     * actual position. Only GPS-quality positions are fed. */
+                    /* Beam estimates only sent if --basestation-beam */
+                    if (basestation_enabled && basestation_beam)
+                        basestation_send_position(reg_f, "", bc_lat, bc_lon,
+                                                  -99999, timestamp);
                 }
             }
         }
