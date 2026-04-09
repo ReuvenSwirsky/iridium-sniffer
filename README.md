@@ -167,6 +167,11 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 # Feed airframes.io directly (iridium-toolkit JSON format over TCP)
 ./iridium-sniffer -i soapy-0 --feed --station=MYSTATION
 
+# Aircraft positions to tar1090/VRS via BaseStation SBS feed
+./iridium-sniffer --update-db                       # download aircraft database (one time)
+./iridium-sniffer -i soapy-0 --acars --basestation  # local server on port 30003
+./iridium-sniffer -i soapy-0 --acars --basestation=HOST:PORT  # push to remote
+
 # Feed acarshub via UDP (iridium-toolkit JSON format)
 ./iridium-sniffer -i soapy-0 --feed=udp://127.0.0.1:5558 --station=MYSTATION
 

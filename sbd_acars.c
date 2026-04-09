@@ -351,6 +351,11 @@ static int stat_sbd_multi_frag = 0; /* multi-packet fragments processed */
 static int stat_sbd_broken = 0;     /* orphan/expired fragments */
 static int stat_acars_total = 0;    /* ACARS messages decoded */
 static int stat_acars_errors = 0;   /* ACARS with CRC/parity errors */
+static int stat_pos_adsc = 0;       /* positions from ADS-C */
+static int stat_pos_text = 0;       /* positions from free text coords */
+static int stat_pos_waypoint = 0;   /* positions from waypoint lookup */
+static int stat_pos_beam = 0;       /* positions from beam estimate */
+static int stat_bs_sent = 0;        /* positions sent via basestation */
 
 /* ---- Timestamp handling ---- */
 
@@ -960,16 +965,25 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         int have_pos;
         if (adsc_pos) {
             have_pos = 1;
+            stat_pos_adsc++;
             double bx, by;
             beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
-        } else if (text_pos || wp_pos) {
+        } else if (text_pos) {
             have_pos = 1;
+            stat_pos_text++;
+            adsc_pos = 1;
+            double bx, by;
+            beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
+        } else if (wp_pos) {
+            have_pos = 1;
+            stat_pos_waypoint++;
             adsc_pos = 1;
             double bx, by;
             beam_cache_lookup(timestamp, &bx, &by, &pos_sat, &pos_beam);
         } else {
             have_pos = beam_cache_lookup(timestamp, &pos_lat, &pos_lon,
                                          &pos_sat, &pos_beam);
+            if (have_pos) stat_pos_beam++;
         }
 
         if (have_pos) {
@@ -982,9 +996,11 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
                                      pos_sat, pos_beam, timestamp, frequency,
                                      adsc_alt, adsc_pos,
                                      oooi_str[0] ? oooi_str : NULL);
-                if (basestation_enabled && (adsc_pos || basestation_beam))
+                if (basestation_enabled && (adsc_pos || basestation_beam)) {
                     basestation_send_position(tail, flt, pos_lat, pos_lon,
                                               adsc_alt, timestamp);
+                    stat_bs_sent++;
+                }
             }
         }
     }
@@ -1437,18 +1453,22 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
 
             int bc_sat = 0, bc_beam = 0;
             if (have_text_pos) {
+                stat_pos_text++;
                 double bx, by;
                 beam_cache_lookup(timestamp, &bx, &by, &bc_sat, &bc_beam);
                 web_map_add_aircraft(reg_f, "", pos_lat, pos_lon,
                                      bc_sat, bc_beam, timestamp, frequency,
                                      -99999, 1, NULL);
-                if (basestation_enabled)
+                if (basestation_enabled) {
                     basestation_send_position(reg_f, "", pos_lat, pos_lon,
                                               -99999, timestamp);
+                    stat_bs_sent++;
+                }
             } else {
                 double bc_lat, bc_lon;
                 if (beam_cache_lookup(timestamp, &bc_lat, &bc_lon,
                                       &bc_sat, &bc_beam)) {
+                    stat_pos_beam++;
                     web_map_add_aircraft(reg_f, "", bc_lat, bc_lon,
                                          bc_sat, bc_beam, timestamp, frequency,
                                          -99999, 0, NULL);
@@ -1821,4 +1841,9 @@ void acars_print_stats(void)
     if (stat_acars_errors > 0)
         fprintf(stderr, " (%d with errors)", stat_acars_errors);
     fprintf(stderr, "\n");
+    if (stat_pos_adsc || stat_pos_text || stat_pos_waypoint || stat_pos_beam)
+        fprintf(stderr, "Positions: %d ADS-C, %d text, %d waypoint, %d beam\n",
+                stat_pos_adsc, stat_pos_text, stat_pos_waypoint, stat_pos_beam);
+    if (stat_bs_sent > 0)
+        fprintf(stderr, "BaseStation: %d positions sent\n", stat_bs_sent);
 }
