@@ -15,13 +15,13 @@ SDR / IQ File / ZMQ SUB / VITA 49
   |  IQ ring buffer extraction for completed bursts
   |  Optional GPU-accelerated FFT (OpenCL or Vulkan plugin)
      |
-     v  burst_queue (512 slots)
+     v  burst_queue (2048 slots)
      |
 [Downmix Workers]    -- 4 threads, pull from shared queue
   |  Coarse CFO correction (frequency shift)
   |  LPF + decimation to 250 kHz (10 sps)
   |  Noise-limiting LPF (20 kHz cutoff, 25 taps)
-  |  Burst start detection (28% magnitude threshold)
+  |  Burst start detection (45% magnitude threshold)
   |  Fine CFO (squared FFT + quadratic interpolation)
   |  RRC matched filter
   |  FFT-based sync word correlation (DL + UL patterns)
@@ -59,7 +59,7 @@ SDR / IQ File / ZMQ SUB / VITA 49
   |
   +--→ [IDA Decoder]     -- inline in demod thread (when --parsed, --gsmtap, --acars)
        |  LCW extraction (46-bit permutation + 3 BCH components)
-       |  FT==2 → IDA frame confirmed
+       |  FT==2 (downlink) or FT==6/7 (uplink) → IDA frame confirmed
        |  Chase BCH soft-decision decoding (LLR-guided bit flipping, --chase)
        |  Payload descramble: 124-bit blocks, de-interleave, BCH(31,20)
        |  CRC-CCITT verification
@@ -76,9 +76,11 @@ SDR / IQ File / ZMQ SUB / VITA 49
             |  SBD packet extraction from reassembled IDA payloads
             |  Multi-packet SBD reassembly
             |  ACARS message parsing (libacars-2 for ARINC-622/ADS-C/CPDLC)
+            |  Position extraction (4-tier: ADS-C > text coords > waypoint > beam)
             |  Terminal output (plain text or JSON)
             |  UDP/TCP feed output (--feed, repeatable, max 4 endpoints)
             |  UDP streaming (--acars-udp, dumpvdl2 envelope format)
+            |  BaseStation SBS output (--basestation, MSG,3 with derived speed/heading)
      |
 [Stats Thread]       -- 1 Hz to stderr, gr-iridium compatible format
 ```
@@ -87,36 +89,42 @@ SDR / IQ File / ZMQ SUB / VITA 49
 
 | File | Purpose | Lines | Origin |
 |------|---------|-------|--------|
-| `main.c` | Entry point, threading, FFTW wisdom, signal handling | 1122 | New |
-| `options.c` | CLI argument parsing, format auto-detection from extension | 691 | New |
+| `main.c` | Entry point, threading, FFTW wisdom, signal handling | 1220 | New |
+| `options.c` | CLI argument parsing, format auto-detection from extension | 839 | New |
 | `iridium.h` | Protocol constants (25 ksps, UW patterns, frame limits) | 54 | New |
-| `burst_detect.c/h` | FFT burst detector (adaptive noise floor, peak extraction) | 1024 | Port of gr-iridium `fft_burst_tagger_impl.cc` |
-| `burst_downmix.c/h` | Per-burst downmix pipeline (CFO, LPF, RRC, correlation) | 836 | Port of gr-iridium `burst_downmix_impl.cc` |
-| `qpsk_demod.c/h` | QPSK/DQPSK demodulator (PLL, Gardner timing recovery) | 538 | Port of gr-iridium `iridium_qpsk_demod_impl.cc` |
-| `frame_output.c/h` | RAW + parsed IDA format printer (ZMQ PUB output) | 362 | Port of gr-iridium `iridium_frame_printer_impl.cc` + new |
-| `frame_decode.c/h` | Iridium frame decoder (BCH, de-interleave, IRA/IBC) | 564 | New (based on iridium-toolkit bitsparser.py) |
-| `ida_decode.c/h` | IDA frame decoder (LCW, Chase BCH, descramble, reassembly) | 751 | New (based on iridium-toolkit bitsparser.py + ida.py) |
-| `sbd_acars.c/h` | SBD/ACARS decoder (libacars-2, feed output, UDP streaming) | 1488 | New (CEMAXECUTER LLC) |
-| `doppler_pos.c/h` | Doppler position solver (IWLS, height aiding, clustering) | 1339 | New (CEMAXECUTER LLC) |
-| `gsmtap.c/h` | GSMTAP/LAPDm UDP output for Wireshark | 103 | New |
-| `web_map.c/h` | Built-in web map (HTTP server, SSE, Leaflet.js) | 1185 | New |
-| `fir_filter.c/h` | FIR filter + tap generation (RRC, RC, LPF) | 193 | New (replaces GR kernels) |
-| `simd_kernels.h` | SIMD dispatch header, mode enum, runtime CPU detection | 193 | New (CEMAXECUTER LLC) |
-| `simd_generic.c` | Scalar fallback + three-tier dispatch initialization | 223 | New (CEMAXECUTER LLC) |
+| `burst_detect.c/h` | FFT burst detector (adaptive noise floor, peak extraction) | 1132 | Port of gr-iridium `fft_burst_tagger_impl.cc` |
+| `burst_downmix.c/h` | Per-burst downmix pipeline (CFO, LPF, RRC, correlation) | 922 | Port of gr-iridium `burst_downmix_impl.cc` |
+| `qpsk_demod.c/h` | QPSK/DQPSK demodulator (PLL, Gardner timing recovery) | 595 | Port of gr-iridium `iridium_qpsk_demod_impl.cc` |
+| `frame_output.c/h` | RAW + parsed IDA format printer (ZMQ PUB output) | 399 | Port of gr-iridium `iridium_frame_printer_impl.cc` + new |
+| `frame_decode.c/h` | Iridium frame decoder (BCH, de-interleave, IRA/IBC) | 637 | New (based on iridium-toolkit bitsparser.py) |
+| `ida_decode.c/h` | IDA frame decoder (LCW, Chase BCH, descramble, reassembly) | 847 | New (based on iridium-toolkit bitsparser.py + ida.py) |
+| `sbd_acars.c/h` | SBD/ACARS decoder (libacars-2, feed output, position extraction) | 1892 | New (CEMAXECUTER LLC) |
+| `doppler_pos.c/h` | Doppler position solver (IWLS, height aiding, clustering) | 1385 | New (CEMAXECUTER LLC) |
+| `gsmtap.c/h` | GSMTAP/LAPDm UDP output for Wireshark | 146 | New |
+| `web_map.c/h` | Built-in web map (HTTP server, SSE, Leaflet.js, page export) | 1269 | New |
+| `fir_filter.c/h` | FIR filter + tap generation (RRC, RC, LPF) | 249 | New (replaces GR kernels) |
+| `aircraft_db.c/h` | Aircraft registration to ICAO hex lookup (tar1090-db) | 247 | New (CEMAXECUTER LLC) |
+| `basestation.c/h` | BaseStation SBS output (MSG,3 with derived speed/heading) | 529 | New (CEMAXECUTER LLC) |
+| `waypoint_db.c/h` | Aviation waypoint/fix lookup (125K entries) | 149 | New (CEMAXECUTER LLC) |
+| `sigmf.c/h` | SigMF metadata reader for auto-config from .sigmf-meta files | 163 | New (CEMAXECUTER LLC) |
+| `simd_kernels.h` | SIMD dispatch header, mode enum, runtime CPU detection | 220 | New (CEMAXECUTER LLC) |
+| `simd_generic.c` | Scalar fallback + four-tier dispatch initialization | 249 | New (CEMAXECUTER LLC) |
 | `simd_avx2.c` | AVX2+FMA kernel implementations (256-bit, 8 floats) | 388 | New (CEMAXECUTER LLC) |
 | `simd_sse42.c` | SSE4.2 kernel implementations (128-bit, 4 floats) | 372 | New (CEMAXECUTER LLC) |
-| `vita49.c/h` | VITA 49 (VRT) UDP input for IQ samples | 423 | New (CEMAXECUTER LLC) |
-| `sdrplay.c/h` | SDRplay RSP backend (native API 3.x) | 433 | New (CEMAXECUTER LLC) |
+| `simd_neon.c` | ARM NEON kernel implementations (128-bit, 4 floats) | 404 | Contributed (Taclane) |
+| `vita49.c/h` | VITA 49 (VRT) UDP input with auto-config from context packets | 530 | New (CEMAXECUTER LLC) |
+| `sdrplay.c/h` | SDRplay RSP backend (native API 3.x) | 449 | New (CEMAXECUTER LLC) |
+| `cJSON.c/h` | JSON parser (vendored, MIT license) | 3512 | Third-party (Dave Gamble) |
 | `rotator.h` | Complex frequency rotator (inline) | 48 | New (replaces GR rotator) |
-| `window_func.c/h` | Blackman window generation | 24 | New |
-| `wgs84.h` | WGS84 ellipsoid constants (for Doppler solver) | - | New |
-| `net_util.h` | Network utility (hostname resolution, endpoint parsing) | - | New |
+| `window_func.c/h` | Blackman window generation | 42 | New |
+| `wgs84.h` | WGS84 ellipsoid constants (for Doppler solver) | 92 | New |
+| `net_util.h` | Network utility (hostname resolution, endpoint parsing) | 35 | New |
 | `fftw_lock.h` | FFTW planner thread-safety mutex | 34 | New |
 | `sdr.h` | SDR abstraction (sample_buf_t, push_samples) | 27 | Copied from ice9 |
-| `hackrf.c/h` | HackRF backend | 88 | Adapted from ice9 |
-| `bladerf.c/h` | BladeRF backend | 174 | Adapted from ice9 |
-| `usrp.c/h` | USRP/UHD backend | 258 | Adapted from ice9 |
-| `soapysdr.c/h` | SoapySDR backend | 392 | Adapted from ice9 |
+| `hackrf.c/h` | HackRF backend | 102 | Adapted from ice9 |
+| `bladerf.c/h` | BladeRF backend | 188 | Adapted from ice9 |
+| `usrp.c/h` | USRP/UHD backend | 274 | Adapted from ice9 |
+| `soapysdr.c/h` | SoapySDR backend | 443 | Adapted from ice9 |
 | `opencl/burst_fft.h` | GPU FFT interface (backend-agnostic, guarded by `USE_GPU`) | ~40 | Adapted from ice9 |
 | `opencl/burst_fft.c` | OpenCL + VkFFT backend (GPU kernels for window/magnitude) | ~360 | Adapted from ice9 `opencl/fft.c` |
 | `vulkan/burst_fft.c` | Vulkan + VkFFT backend (CPU window/magnitude, GPU FFT only) | ~300 | New |
@@ -124,6 +132,7 @@ SDR / IQ File / ZMQ SUB / VITA 49
 | `blocking_queue.h` | Lock-free blocking queue | 556 | Copied from ice9 |
 | `fair_lock.h` | Fair reader-writer lock | 292 | Copied from ice9 |
 | `pthread_barrier.h` | macOS pthread_barrier shim | 81 | Copied from ice9 |
+| `data/waypoints.csv` | Aviation waypoint database (125K fixes) | 125230 | Merged (GPL/MIT) |
 
 ## Key Parameters (at 10 MHz sample rate)
 
