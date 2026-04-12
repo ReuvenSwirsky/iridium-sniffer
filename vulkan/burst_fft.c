@@ -136,9 +136,38 @@ GPU_API gpu_burst_fft_t *gpu_burst_fft_create(int fft_size, int batch_size,
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .apiVersion = VK_API_VERSION_1_1,
     };
+
+    /* Since Vulkan SDK 1.3.216, portability drivers (e.g. MoltenVK on macOS)
+     * mark themselves with is_portability_driver=true.  The loader hides them
+     * from apps that don't explicitly opt in, returning
+     * VK_ERROR_INCOMPATIBLE_DRIVER (-9).  Probe for the extension at runtime
+     * so the same binary works on Linux without it. */
+#ifdef VK_KHR_portability_enumeration
+    const char *portability_ext = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    uint32_t ext_count = 0;
+    vkEnumerateInstanceExtensionProperties(NULL, &ext_count, NULL);
+    VkExtensionProperties *exts = malloc(ext_count * sizeof(*exts));
+    vkEnumerateInstanceExtensionProperties(NULL, &ext_count, exts);
+    int has_portability = 0;
+    for (uint32_t e = 0; e < ext_count; e++) {
+        if (strcmp(exts[e].extensionName, portability_ext) == 0) {
+            has_portability = 1;
+            break;
+        }
+    }
+    free(exts);
+#else
+    int has_portability = 0;
+#endif
+
     VkInstanceCreateInfo inst_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app_info,
+#ifdef VK_KHR_portability_enumeration
+        .flags = has_portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0,
+        .enabledExtensionCount = has_portability ? 1 : 0,
+        .ppEnabledExtensionNames = has_portability ? &portability_ext : NULL,
+#endif
     };
 
     vk = vkCreateInstance(&inst_info, NULL, &g->instance);

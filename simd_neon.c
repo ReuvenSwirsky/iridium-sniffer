@@ -69,10 +69,13 @@ void neon_fir_ccf(const float *taps, int ntaps,
 
 /* ---- Decimating complex FIR ----
  *
- * Can't batch outputs easily (stride = decimation), so vectorize inner
- * tap loop: process 2 taps at a time using interleaved coefficients
- * [t0,t0,t1,t1] applied to 2 consecutive complex inputs [re0,im0,re1,im1].
- * Reduce 4-lane accumulator to 1 complex result after the tap loop.
+ * vld2q_f32 deinterleaves 4 complex inputs in hardware:
+ *   pair.val[0] = [re_k,  re_{k+1},  re_{k+2},  re_{k+3}]
+ *   pair.val[1] = [im_k,  im_{k+1},  im_{k+2},  im_{k+3}]
+ * No vdup_lane/vcombine shuffles needed.  Separate re/im accumulators give
+ * two independent FMA chains.  8-tap unroll with 4 accumulators hides the
+ * 4-cycle FMA latency on M3 (4 independent chains = steady-state throughput
+ * limited by memory bandwidth, not latency).
  */
 void neon_fir_ccf_dec(const float *taps, int ntaps,
                       const float complex *in, float complex *out,
@@ -82,29 +85,37 @@ void neon_fir_ccf_dec(const float *taps, int ntaps,
 
     for (int i = 0; i < n_out; i++) {
         const float *p = &inp[i * decimation * 2];
-        float32x4_t acc = vdupq_n_f32(0.0f);
+        float32x4_t acc_re0 = vdupq_n_f32(0.0f);
+        float32x4_t acc_im0 = vdupq_n_f32(0.0f);
+        float32x4_t acc_re1 = vdupq_n_f32(0.0f);
+        float32x4_t acc_im1 = vdupq_n_f32(0.0f);
         int k = 0;
 
-        /* Process 2 taps at a time: 4 floats = 2 complex values */
-        for (; k + 1 < ntaps; k += 2) {
-            float32x4_t data = vld1q_f32(&p[k * 2]); /* [re_k, im_k, re_k+1, im_k+1] */
-            /* Interleave coefficients: [t_k, t_k, t_k+1, t_k+1] */
-            float32x2_t t2 = vld1_f32(&taps[k]);
-            float32x4_t coeff = vcombine_f32(vdup_lane_f32(t2, 0),
-                                             vdup_lane_f32(t2, 1));
-            acc = vfmaq_f32(acc, coeff, data);
+        /* 8-tap main loop: 2 × vld2q + 2 × vld1q + 4 × vfmaq per iter */
+        for (; k + 7 < ntaps; k += 8) {
+            float32x4x2_t d0 = vld2q_f32(&p[k * 2]);
+            float32x4x2_t d1 = vld2q_f32(&p[(k + 4) * 2]);
+            float32x4_t   t0 = vld1q_f32(&taps[k]);
+            float32x4_t   t1 = vld1q_f32(&taps[k + 4]);
+            acc_re0 = vfmaq_f32(acc_re0, d0.val[0], t0);
+            acc_im0 = vfmaq_f32(acc_im0, d0.val[1], t0);
+            acc_re1 = vfmaq_f32(acc_re1, d1.val[0], t1);
+            acc_im1 = vfmaq_f32(acc_im1, d1.val[1], t1);
         }
 
-        /* Horizontal reduce: acc = [re_part0, im_part0, re_part1, im_part1]
-         * → result = [re_total, im_total]                                 */
-        float32x2_t lo = vget_low_f32(acc);   /* [re_part0, im_part0] */
-        float32x2_t hi = vget_high_f32(acc);  /* [re_part1, im_part1] */
-        float32x2_t result = vadd_f32(lo, hi);
+        /* 4-tap tail */
+        for (; k + 3 < ntaps; k += 4) {
+            float32x4x2_t dx = vld2q_f32(&p[k * 2]);
+            float32x4_t   tx = vld1q_f32(&taps[k]);
+            acc_re0 = vfmaq_f32(acc_re0, dx.val[0], tx);
+            acc_im0 = vfmaq_f32(acc_im0, dx.val[1], tx);
+        }
 
-        float acc_re = vget_lane_f32(result, 0);
-        float acc_im = vget_lane_f32(result, 1);
+        /* Merge accumulators → scalars */
+        float acc_re = vaddvq_f32(vaddq_f32(acc_re0, acc_re1));
+        float acc_im = vaddvq_f32(vaddq_f32(acc_im0, acc_im1));
 
-        /* Scalar tail */
+        /* Scalar tail (< 4 remaining taps) */
         for (; k < ntaps; k++) {
             acc_re += taps[k] * p[k * 2];
             acc_im += taps[k] * p[k * 2 + 1];
