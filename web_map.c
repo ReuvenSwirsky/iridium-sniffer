@@ -50,6 +50,8 @@
 #define MAX_AIRCRAFT     32
 #define MAX_AIRCRAFT_FIXES 8
 #define MAX_SSE_CLIENTS  8
+#define MAX_ACARS_MSGS   100
+#define ACARS_TEXT_MAX   256
 #define JSON_BUF_SIZE    131072
 #define HTTP_BUF_SIZE    4096
 
@@ -111,6 +113,16 @@ typedef struct {
     uint64_t last_seen;  /* ns, for eviction */
 } aircraft_entry_t;
 
+/* Recent ACARS message entry for the chronological feed tab */
+typedef struct {
+    char reg[16];
+    char flight[8];
+    char label[4];
+    char text[ACARS_TEXT_MAX];
+    int ul;
+    uint64_t timestamp;
+} acars_msg_t;
+
 static struct {
     pthread_mutex_t lock;
     ra_point_t ra[MAX_RA_POINTS];
@@ -126,12 +138,16 @@ static struct {
     int n_sats;
     aircraft_entry_t aircraft[MAX_AIRCRAFT];
     int n_aircraft;
+    acars_msg_t acars[MAX_ACARS_MSGS];
+    int acars_head;
+    int acars_count;
     unsigned long total_ira;
     unsigned long total_ibc;
     unsigned long total_pages;
     unsigned long total_beams;
     unsigned long total_mt;
     unsigned long total_aircraft;
+    unsigned long total_acars_msgs;
     /* Doppler positioning receiver estimate */
     double rx_lat, rx_lon;
     double rx_hdop;
@@ -495,6 +511,45 @@ void web_map_add_aircraft(const char *reg, const char *flight,
     pthread_mutex_unlock(&state.lock);
 }
 
+void web_map_add_acars_message(const char *reg, const char *flight,
+                                const char *label, const char *text,
+                                int ul, uint64_t timestamp_ns)
+{
+    if (!reg || !label || !text || !text[0]) return;
+
+    pthread_mutex_lock(&state.lock);
+
+    acars_msg_t *m = &state.acars[state.acars_head];
+
+    /* Strip leading dots from registration */
+    const char *r = reg;
+    while (*r == '.') r++;
+    strncpy(m->reg, r, sizeof(m->reg) - 1);
+    m->reg[sizeof(m->reg) - 1] = '\0';
+
+    m->flight[0] = '\0';
+    if (flight && flight[0]) {
+        strncpy(m->flight, flight, sizeof(m->flight) - 1);
+        m->flight[sizeof(m->flight) - 1] = '\0';
+    }
+
+    strncpy(m->label, label, sizeof(m->label) - 1);
+    m->label[sizeof(m->label) - 1] = '\0';
+
+    strncpy(m->text, text, sizeof(m->text) - 1);
+    m->text[sizeof(m->text) - 1] = '\0';
+
+    m->ul = ul ? 1 : 0;
+    m->timestamp = timestamp_ns;
+
+    state.acars_head = (state.acars_head + 1) % MAX_ACARS_MSGS;
+    if (state.acars_count < MAX_ACARS_MSGS)
+        state.acars_count++;
+    state.total_acars_msgs++;
+
+    pthread_mutex_unlock(&state.lock);
+}
+
 /* ---- JSON serialization ---- */
 
 static int build_json(char *buf, int bufsize)
@@ -621,6 +676,36 @@ static int build_json(char *buf, int bufsize)
             state.rx_lat, state.rx_lon, state.rx_hdop);
     }
 
+    /* Recent ACARS messages (chronological feed) */
+    off += snprintf(buf + off, bufsize - off,
+        ",\"total_acars_msgs\":%lu,\"acars\":[", state.total_acars_msgs);
+    int n_msgs = state.acars_count;
+    int n_emit = 0;
+    for (int i = n_msgs - 1; i >= 0 && off < bufsize - 1024; i--) {
+        int idx = (state.acars_head - 1 - (n_msgs - 1 - i) + MAX_ACARS_MSGS)
+                  % MAX_ACARS_MSGS;
+        const acars_msg_t *m = &state.acars[idx];
+        if (n_emit > 0)
+            off += snprintf(buf + off, bufsize - off, ",");
+        /* Escape quotes and backslashes in text/reg/flight */
+        char esc_text[ACARS_TEXT_MAX * 2 + 1];
+        int e = 0;
+        for (int k = 0; m->text[k] && e < (int)sizeof(esc_text) - 2; k++) {
+            char c = m->text[k];
+            if (c == '"' || c == '\\') esc_text[e++] = '\\';
+            if (c < 0x20 || c == 0x7f) c = ' ';
+            esc_text[e++] = c;
+        }
+        esc_text[e] = '\0';
+        off += snprintf(buf + off, bufsize - off,
+            "{\"t\":%llu,\"reg\":\"%s\",\"flt\":\"%s\","
+            "\"lbl\":\"%s\",\"ul\":%d,\"txt\":\"%s\"}",
+            (unsigned long long)(m->timestamp / 1000000000ULL),
+            m->reg, m->flight, m->label, m->ul, esc_text);
+        n_emit++;
+    }
+    off += snprintf(buf + off, bufsize - off, "]");
+
     off += snprintf(buf + off, bufsize - off, "}");
 
     pthread_mutex_unlock(&state.lock);
@@ -667,6 +752,25 @@ static const char HTML_PAGE[] =
 ".leaflet-control-layers{background:rgba(15,23,42,0.92)!important;\n"
 "  color:#e2e8f0!important;border:1px solid #334155!important}\n"
 ".leaflet-control-layers label{color:#e2e8f0}\n"
+"#main{display:flex;width:100vw;height:calc(100vh - 44px)}\n"
+"#map{flex:1;height:100%;width:auto}\n"
+"#acars-side{width:380px;height:100%;background:#0f172a;\n"
+"  border-left:1px solid #334155;overflow-y:auto;color:#e2e8f0;\n"
+"  font-family:'SF Mono',Consolas,monospace;font-size:11px}\n"
+"#acars-side .header{padding:8px 12px;background:#1e293b;\n"
+"  border-bottom:1px solid #334155;font-size:11px;\n"
+"  text-transform:uppercase;letter-spacing:1px;color:#94a3b8;\n"
+"  font-weight:600;position:sticky;top:0;z-index:10}\n"
+".amsg{padding:6px 10px;border-bottom:1px solid #1e293b;line-height:1.5}\n"
+".amsg:hover{background:#1e293b}\n"
+".amsg .row1{display:flex;gap:8px;color:#64748b;font-size:10px;\n"
+"  margin-bottom:2px}\n"
+".amsg .reg{color:#38bdf8;font-weight:600}\n"
+".amsg .flt{color:#94a3b8}\n"
+".amsg .lbl{color:#fbbf24}\n"
+".amsg .dir{color:#475569}\n"
+".amsg .txt{color:#e2e8f0;white-space:pre-wrap;word-break:break-word}\n"
+".no-msgs{text-align:center;color:#64748b;padding:32px 12px;font-size:11px}\n"
 "</style></head><body>\n"
 "<div id=\"bar\">\n"
 "  <span class=\"title\">iridium-sniffer</span>\n"
@@ -677,9 +781,18 @@ static const char HTML_PAGE[] =
 "  <button id=\"btn-export\" onclick=\"exportPages()\" style=\"background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px\">Export Pages CSV</button>\n"
 "  <span class=\"stat\">Sats <span id=\"n-sats\" class=\"val\">0</span></span>\n"
 "  <span class=\"stat\">IRA <span id=\"n-ira\" class=\"val\">0</span></span>\n"
+"  <span class=\"stat\">ACARS <span id=\"n-acars\" class=\"val\">0</span></span>\n"
 "  <span id=\"status\" style=\"color:#64748b\">connecting...</span>\n"
 "</div>\n"
-"<div id=\"map\"></div>\n"
+"<div id=\"main\">\n"
+"  <div id=\"map\"></div>\n"
+"  <div id=\"acars-side\">\n"
+"    <div class=\"header\">Recent ACARS</div>\n"
+"    <div id=\"acars-list\">\n"
+"      <div class=\"no-msgs\">No ACARS messages yet<br>(heartbeats filtered)</div>\n"
+"    </div>\n"
+"  </div>\n"
+"</div>\n"
 "<div class=\"legend\">\n"
 "  <div class=\"legend-title\">Map</div>\n"
 "  <div class=\"legend-row\">\n"
@@ -719,6 +832,36 @@ static const char HTML_PAGE[] =
 "  '#fb923c','#facc15','#4ade80','#818cf8','#f87171',\n"
 "  '#2dd4bf','#c084fc','#38bdf8','#fb7185','#a3e635'];\n"
 "function sc(id){return C[id%C.length]}\n"
+"\n"
+"function fmtTime(t){\n"
+"  var d=new Date(t*1000);\n"
+"  var h=String(d.getUTCHours()).padStart(2,'0');\n"
+"  var m=String(d.getUTCMinutes()).padStart(2,'0');\n"
+"  var s=String(d.getUTCSeconds()).padStart(2,'0');\n"
+"  return h+':'+m+':'+s+'Z';\n"
+"}\n"
+"\n"
+"function renderAcars(msgs){\n"
+"  var box=document.getElementById('acars-list');\n"
+"  if(!msgs||msgs.length===0){\n"
+"    box.innerHTML='<div class=\"no-msgs\">No ACARS messages yet<br>(heartbeats filtered)</div>';\n"
+"    return;\n"
+"  }\n"
+"  var html='';\n"
+"  msgs.forEach(function(m){\n"
+"    var txt=(m.txt||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n"
+"    html+='<div class=\"amsg\">'+\n"
+"      '<div class=\"row1\">'+\n"
+"      '<span>'+fmtTime(m.t)+'</span>'+\n"
+"      '<span class=\"reg\">'+m.reg+'</span>'+\n"
+"      (m.flt?'<span class=\"flt\">'+m.flt+'</span>':'')+\n"
+"      '<span class=\"lbl\">'+m.lbl+'</span>'+\n"
+"      '<span class=\"dir\">'+(m.ul?'UL':'DL')+'</span>'+\n"
+"      '</div>'+\n"
+"      '<div class=\"txt\">'+txt+'</div></div>';\n"
+"  });\n"
+"  box.innerHTML=html;\n"
+"}\n"
 "\n"
 "var allPages=[];\n"
 "function exportPages(){\n"
@@ -762,8 +905,10 @@ static const char HTML_PAGE[] =
 "  document.getElementById('n-mt').textContent=d.total_mt||0;\n"
 "  document.getElementById('n-ac').textContent=d.total_aircraft||0;\n"
 "  document.getElementById('n-pages').textContent=d.total_pages;\n"
+"  document.getElementById('n-acars').textContent=d.total_acars_msgs||0;\n"
 "  document.getElementById('status').style.color='#22c55e';\n"
 "  document.getElementById('status').textContent='live';\n"
+"  renderAcars(d.acars||[]);\n"
 "\n"
 "  if(popupOpen)return;\n"
 "\n"

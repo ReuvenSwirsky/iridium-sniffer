@@ -62,4 +62,11 @@ void web_map_add_aircraft(const char *reg, const char *flight,
                            int alt_ft, int adsc_pos,
                            const char *oooi);
 
+/* Append an ACARS message to the recent messages feed (chronological tab).
+ * Heartbeats (label "_d") and empty-text messages should not be passed in --
+ * filter at the call site. Thread-safe. */
+void web_map_add_acars_message(const char *reg, const char *flight,
+                                const char *label, const char *text,
+                                int ul, uint64_t timestamp_ns);
+
 #endif

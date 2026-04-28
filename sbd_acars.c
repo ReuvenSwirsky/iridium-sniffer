@@ -875,6 +875,17 @@ static void acars_parse_libacars(const uint8_t *data, int len, int ul,
         fflush(stdout);
     }
 
+    /* Web map ACARS feed sidebar (filter heartbeats and empty-text messages) */
+    if (web_enabled && !msg->err && msg->reg[0] && msg->txt && msg->txt[0]) {
+        int is_heartbeat = (msg->label[0] == '_' && msg->label[1] == 'd');
+        if (!is_heartbeat) {
+            const char *tail = msg->reg;
+            while (*tail == '.') tail++;
+            web_map_add_acars_message(tail, msg->flight_id,
+                                       msg->label, msg->txt, ul, timestamp);
+        }
+    }
+
     /* acarshub/airframes compat output (iridium-toolkit format) */
     if (feed_any_active() &&
         !msg->err) {
@@ -1400,6 +1411,20 @@ static void acars_parse_fallback(const uint8_t *data, int len, int ul,
                        ul, txt, txt_len, flight, msg_num, msg_num_seq,
                        errors, timestamp, frequency, magnitude,
                        hdr, hdr_len);
+
+        /* Web map ACARS feed sidebar (filter heartbeats + empty text) */
+        if (web_enabled && reg[0] && txt && txt_len > 0) {
+            int is_heartbeat = (label[0] == '_' && label[1] == 'd');
+            if (!is_heartbeat) {
+                char txt_z[256];
+                int zlen = txt_len < (int)sizeof(txt_z) - 1 ?
+                           txt_len : (int)sizeof(txt_z) - 1;
+                memcpy(txt_z, txt, zlen);
+                txt_z[zlen] = '\0';
+                web_map_add_acars_message(reg, flight, label, txt_z,
+                                           ul, timestamp);
+            }
+        }
     }
 
     /* Aircraft position (requires --web, no errors) */
