@@ -95,6 +95,7 @@ extern int use_gpu;
 extern int simd_mode;
 extern int use_chase;
 extern char *save_bursts_dir;
+extern char *record_iq_path;
 extern int web_enabled;
 extern int web_port;
 extern int gsmtap_enabled;
@@ -134,6 +135,7 @@ extern int iq_format_explicit;
 extern int clock_source;
 extern int time_source;
 extern int start_next_minute;
+extern int capture_duration;
 
 static void usage(int exitcode) {
     fprintf(stderr,
@@ -155,6 +157,7 @@ static void usage(int exitcode) {
 "    -c, --center-freq=HZ    center frequency in Hz (default: 1622000000)\n"
 "    -r, --sample-rate=HZ    sample rate in Hz (default: 10000000)\n"
 "    -B, --bias-tee           enable bias tee power\n"
+"    -t, --duration=SECONDS   exit after SECONDS of capture (0 = unlimited)\n"
 "    --clock-source=SRC       clock reference: internal (default), external, gpsdo\n"
 "    --time-source=SRC        time/PPS reference: internal (default), external, gpsdo\n"
 "    --start-next-minute      delay capture start until the top of the next UTC minute\n"
@@ -201,6 +204,7 @@ static void usage(int exitcode) {
 "Output options:\n"
 "    --file-info=STR         file info string for output (default: auto)\n"
 "    --save-bursts=DIR       save IQ samples of decoded bursts to directory\n"
+"    --record-iq=FILE        record the raw input IQ stream to FILE (SDR-native format)\n"
 "    --diagnostic            setup verification mode (suppresses RAW output)\n"
 "    --no-gardner           disable Gardner timing recovery (enabled by default)\n"
 "    --parsed               output parsed IDA lines (pipe to reassembler.py)\n"
@@ -289,6 +293,7 @@ void parse_options(int argc, char **argv) {
         OPT_WEB,
         OPT_GSMTAP,
         OPT_SAVE_BURSTS,
+        OPT_RECORD_IQ,
         OPT_DIAGNOSTIC,
         OPT_GARDNER,
         OPT_NO_GARDNER,
@@ -324,6 +329,7 @@ void parse_options(int argc, char **argv) {
         { "sample-rate",    required_argument, NULL, 'r' },
         { "bias-tee",       no_argument,       NULL, 'B' },
         { "threshold",      required_argument, NULL, 'd' },
+        { "duration",       required_argument, NULL, 't' },
         { "file-info",      required_argument, NULL, OPT_FILE_INFO },
         { "format",         required_argument, NULL, OPT_FORMAT },
         { "verbose",        no_argument,       NULL, 'v' },
@@ -342,6 +348,7 @@ void parse_options(int argc, char **argv) {
         { "web",            optional_argument, NULL, OPT_WEB },
         { "gsmtap",         optional_argument, NULL, OPT_GSMTAP },
         { "save-bursts",    required_argument, NULL, OPT_SAVE_BURSTS },
+        { "record-iq",      required_argument, NULL, OPT_RECORD_IQ },
         { "diagnostic",     no_argument,       NULL, OPT_DIAGNOSTIC },
         { "gardner",        no_argument,       NULL, OPT_GARDNER },
         { "no-gardner",     no_argument,       NULL, OPT_NO_GARDNER },
@@ -370,7 +377,7 @@ void parse_options(int argc, char **argv) {
         { NULL,             0,                 NULL, 0 }
     };
 
-    while ((ch = getopt_long(argc, argv, "f:li:c:r:Bd:vh", longopts, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "f:li:c:r:Bd:vht:", longopts, NULL)) != -1) {
         switch (ch) {
             case 'f':
                 in_file = fopen(optarg, "rb");
@@ -443,6 +450,12 @@ void parse_options(int argc, char **argv) {
 
             case 'd':
                 threshold_db = atof(optarg);
+                break;
+
+            case 't':
+                capture_duration = atoi(optarg);
+                if (capture_duration < 0)
+                    errx(1, "Invalid duration: %s", optarg);
                 break;
 
             case 'v':
@@ -522,6 +535,10 @@ void parse_options(int argc, char **argv) {
 
             case OPT_SAVE_BURSTS:
                 save_bursts_dir = strdup(optarg);
+                break;
+
+            case OPT_RECORD_IQ:
+                record_iq_path = strdup(optarg);
                 break;
 
             case OPT_DIAGNOSTIC:

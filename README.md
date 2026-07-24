@@ -649,6 +649,21 @@ The `--save-bursts` option saves IQ samples from successfully decoded bursts to 
 
 Captured IQ is at 250 kHz sample rate, 10 samples per symbol, after RRC matched filtering. Each file contains one complete burst ready for demodulation.
 
+## Raw IQ Recording
+
+The `--record-iq=FILE` option records the **full wideband input stream** to a file, exactly as delivered by the SDR (no decimation or filtering). For the USRP this is the `sc8` format (interleaved int8 I/Q), which replays with `--format ci8`. Other backends record in their native sample format.
+
+```bash
+# Record 2 minutes of raw wideband IQ, minute-aligned, from a USRP with external timing
+./iridium-sniffer -i usrp-B200-SERIAL --clock-source external --time-source external \
+    --start-next-minute -t 120 --record-iq capture.ci8
+
+# Replay it later
+./iridium-sniffer -f capture.ci8 --format ci8 -r 10000000 -c 1622000000
+```
+
+Recording happens on the SDR receive thread, so on slow storage the extra I/O can contribute to overflows (shown as `ov:` in the status line). Use an SSD at 10 MHz (~20 MB/s for sc8). Unlike `--save-bursts` (per-burst 250 kHz snippets), `--record-iq` captures the entire input band.
+
 ## Usage
 
 ### File Input
@@ -858,8 +873,10 @@ SDR options:
     -c, --center-freq=HZ    center frequency in Hz (default: 1622000000)
     -r, --sample-rate=HZ    sample rate in Hz (default: 10000000)
     -B, --bias-tee          enable bias tee power
+    -t, --duration=SECONDS  exit after SECONDS of capture (0 = unlimited)
     --clock-source=SRC      clock reference: internal (default), external, gpsdo
     --time-source=SRC       time/PPS reference: internal (default), external, gpsdo
+    --start-next-minute     delay capture start until the top of the next UTC minute (USRP)
 
 Gain options:
     --hackrf-lna=GAIN       HackRF LNA gain in dB (default: 40)
@@ -919,6 +936,7 @@ Output:
     --chase[=N]             Chase soft-decision BCH decoder (experimental)
                              N = flip-bits 0-7 (try --chase=5 for 31 combos)
     --save-bursts=DIR       save IQ samples of decoded bursts to directory
+    --record-iq=FILE        record the raw input IQ stream to FILE (SDR-native format)
     --diagnostic            setup verification mode (suppresses RAW output)
     --no-gardner            disable Gardner timing recovery (enabled by default)
     --simd=MODE             SIMD kernel selection: auto (default), avx2, sse42, neon, scalar

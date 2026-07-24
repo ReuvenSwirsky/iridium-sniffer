@@ -157,6 +157,8 @@ int use_gpu = 1;
 
 int simd_mode = 0;  /* SIMD_AUTO */
 char *save_bursts_dir = NULL;
+char *record_iq_path = NULL;
+FILE *record_iq_file = NULL;
 int diagnostic_mode = 0;
 int use_gardner = 1;
 int parsed_mode = 0;
@@ -256,6 +258,9 @@ int time_source = CLOCK_SRC_INTERNAL;
 /* Delay capture start until the top of the next UTC minute (USRP backend) */
 int start_next_minute = 0;
 
+/* Exit after this many seconds of runtime (0 = run until interrupted) */
+int capture_duration = 0;
+
 /* Threading state */
 volatile sig_atomic_t running = 1;
 pid_t self_pid;
@@ -283,6 +288,9 @@ atomic_ulong stat_n_output_drops = 0;
 atomic_ulong stat_n_overflows = 0;
 atomic_ulong stat_sample_count = 0;
 
+/* Monotonic ms timestamp when the first sample buffer arrived (0 = not yet) */
+atomic_ulong capture_start_ms = 0;
+
 /* Global detector pointer for diagnostic stats (set by detector thread) */
 burst_detector_t *global_detector = NULL;
 
@@ -293,7 +301,19 @@ void parse_options(int argc, char **argv);
 
 /* ---- Sample buffer management ---- */
 
+static unsigned long now_ms(void);
+
 void push_samples(sample_buf_t *buf) {
+    if (atomic_load(&capture_start_ms) == 0)
+        atomic_store(&capture_start_ms, now_ms());
+    if (record_iq_file) {
+        /* Write the raw samples exactly as delivered by the SDR (for the USRP
+         * this is sc8: interleaved int8 I/Q). */
+        size_t sample_bytes = (buf->format == SAMPLE_FMT_FLOAT)
+            ? (size_t)buf->num * 2 * sizeof(float)
+            : (size_t)buf->num * 2 * sizeof(int8_t);
+        fwrite(buf->samples, 1, sample_bytes, record_iq_file);
+    }
     atomic_fetch_add(&stat_sample_count, buf->num);
     if (blocking_queue_add(&samples_queue, buf) == BQ_FULL) {
         if (verbose)
@@ -686,6 +706,21 @@ static void *stats_thread_fn(void *arg) {
         unsigned long now = now_ms();
         double dt = (now - prev_t) / 1000.0;
         double elapsed = (now - t0) / 1000.0;
+
+        /* Duration limit: stop after the requested capture time, measured from
+         * when samples actually started flowing (not program start). */
+        if (capture_duration > 0) {
+            unsigned long cap_start = atomic_load(&capture_start_ms);
+            if (cap_start != 0 && (now - cap_start) / 1000.0 >= capture_duration) {
+                if (verbose)
+                    fprintf(stderr, "Duration limit (%d s) reached; stopping\n",
+                            capture_duration);
+                running = 0;
+                kill(self_pid, SIGINT);
+                break;
+            }
+        }
+
         if (dt < 0.01 || elapsed < 0.01) { prev_t = now; continue; }
         prev_t = now;
 
@@ -875,6 +910,13 @@ int main(int argc, char **argv) {
     fftw_lock_init();
     fftw_load_wisdom();
     frame_output_init(file_info);
+
+    if (record_iq_path) {
+        record_iq_file = fopen(record_iq_path, "wb");
+        if (!record_iq_file)
+            err(1, "Cannot open IQ record file '%s'", record_iq_path);
+        fprintf(stderr, "Recording raw IQ to %s\n", record_iq_path);
+    }
 
 #ifdef HAVE_ZMQ
     if (zmq_enabled) {
@@ -1261,6 +1303,9 @@ int main(int argc, char **argv) {
 
     if (in_file != NULL)
         fclose(in_file);
+
+    if (record_iq_file)
+        fclose(record_iq_file);
 
     fftw_save_wisdom();
     free(file_info);
