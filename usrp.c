@@ -340,6 +340,14 @@ void *usrp_stream_thread(void *arg) {
         buf = s->samples;
         uhd_rx_streamer_recv(rx_handle, &buf, num_samples, &md, 3.0, false, &num_rx_samples);
         uhd_rx_metadata_error_code(md, &error_code);
+        if (error_code == UHD_RX_METADATA_ERROR_CODE_TIMEOUT) {
+            /* No samples yet.  This is expected while waiting for a scheduled
+             * start (e.g. --start-next-minute, which arms a timed stream command
+             * up to a minute in the future) or during a transient stall.  Retry
+             * rather than treating it as fatal. */
+            free(s);
+            continue;
+        }
         if (error_code == UHD_RX_METADATA_ERROR_CODE_OVERFLOW) {
             /* Samples were dropped.  The next buffer's hardware time_spec
              * reflects the true elapsed time, so burst timing re-anchors and
@@ -349,6 +357,11 @@ void *usrp_stream_thread(void *arg) {
                 fprintf(stderr, "USRP: overflow (samples dropped)\n");
         } else if (error_code != UHD_RX_METADATA_ERROR_CODE_NONE) {
             errx(1, "Error during streaming: %u", error_code);
+        }
+
+        if (num_rx_samples == 0) {
+            free(s);
+            continue;
         }
         s->num = num_rx_samples;
 
