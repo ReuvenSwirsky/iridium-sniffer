@@ -59,6 +59,14 @@ typedef struct {
     float relative_magnitude;
 } peak_t;
 
+/* Maps an absolute sample index to the hardware timestamp reported for the
+ * buffer that began at that index.  Used to re-derive burst times from the
+ * nearest hardware anchor so dropped-sample (overflow) gaps self-correct. */
+typedef struct {
+    uint64_t sample_index;   /* absolute index of first sample in the buffer */
+    uint64_t hw_ts_ns;       /* hardware timestamp for that buffer */
+} ts_anchor_t;
+
 /* ---- Burst detector state ---- */
 
 struct _burst_detector {
@@ -130,8 +138,16 @@ struct _burst_detector {
     size_t convert_buf_size;
 
     /* Timestamp */
-    uint64_t start_time_ns;     /* nanosecond timestamp at sample 0 */
+    uint64_t start_time_ns;     /* nanosecond timestamp at sample 0 (fallback) */
     uint64_t pending_hw_ts;     /* hardware timestamp for next feed (0=none) */
+
+    /* Per-buffer UTC anchors (growable FIFO, oldest first).  Populated when the
+     * SDR provides hardware timestamps; lets burst times track hardware time so
+     * overflow gaps do not accumulate drift. */
+    ts_anchor_t *anchors;
+    int anchors_len;
+    int anchors_cap;
+    int have_hw_anchor;         /* set once a hardware timestamp has been seen */
 
     /* GPU plugin (loaded via dlopen) */
     void *gpu_handle;           /* dlopen handle */
@@ -422,6 +438,7 @@ void burst_detector_destroy(burst_detector_t *d) {
     free(d->gone_bursts);
     free(d->ringbuf);
     free(d->convert_buf);
+    free(d->anchors);
     fprintf(stderr, "burst_detect: tagged %lu bursts total\n",
             (unsigned long)d->n_tagged_bursts);
     free(d);
@@ -782,6 +799,47 @@ static void process_fft_frame(burst_detector_t *d, const float complex *samples)
     update_filters_post(d, 0);
 }
 
+/* ---- Internal: per-buffer UTC timestamp anchors ---- */
+
+static void ts_anchor_push(burst_detector_t *d, uint64_t sample_index,
+                           uint64_t hw_ts_ns) {
+    /* Drop anchors that predate the oldest sample still in the IQ ringbuffer,
+     * but keep the newest one at or before ringbuf_start so a burst starting at
+     * the very edge can still be resolved. */
+    int keep = 0;
+    for (int i = 0; i < d->anchors_len; i++) {
+        if (d->anchors[i].sample_index <= d->ringbuf_start)
+            keep = i;
+        else
+            break;
+    }
+    if (keep > 0) {
+        memmove(d->anchors, d->anchors + keep,
+                (d->anchors_len - keep) * sizeof(ts_anchor_t));
+        d->anchors_len -= keep;
+    }
+
+    if (d->anchors_len == d->anchors_cap) {
+        d->anchors_cap = d->anchors_cap ? d->anchors_cap * 2 : 256;
+        d->anchors = realloc(d->anchors, d->anchors_cap * sizeof(ts_anchor_t));
+    }
+    d->anchors[d->anchors_len].sample_index = sample_index;
+    d->anchors[d->anchors_len].hw_ts_ns = hw_ts_ns;
+    d->anchors_len++;
+}
+
+/* Return the newest anchor whose sample_index <= target (or the oldest if the
+ * target predates all anchors, or NULL if there are none). */
+static const ts_anchor_t *ts_anchor_lookup(burst_detector_t *d, uint64_t target) {
+    if (d->anchors_len == 0)
+        return NULL;
+    for (int i = d->anchors_len - 1; i >= 0; i--) {
+        if (d->anchors[i].sample_index <= target)
+            return &d->anchors[i];
+    }
+    return &d->anchors[0];
+}
+
 /* ---- Internal: emit completed bursts ---- */
 
 static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *user) {
@@ -814,7 +872,21 @@ static void emit_gone_bursts(burst_detector_t *d, burst_callback_t cb, void *use
         bd->center_frequency = d->center_frequency;
         bd->sample_rate = d->sample_rate;
         bd->fft_size = d->fft_size;
-        bd->start_time_ns = d->start_time_ns;
+        /* Re-derive the burst's time base from the nearest per-buffer hardware
+         * anchor so overflow gaps don't accumulate drift.  Express it as an
+         * effective "sample 0" time so the downstream formula
+         * (start_time_ns + start/sample_rate) yields the correct absolute time. */
+        {
+            const ts_anchor_t *a = d->have_hw_anchor
+                ? ts_anchor_lookup(d, ab->start) : NULL;
+            if (a) {
+                uint64_t anchor_off_ns =
+                    (uint64_t)((double)a->sample_index / d->sample_rate * 1e9);
+                bd->start_time_ns = a->hw_ts_ns - anchor_off_ns;
+            } else {
+                bd->start_time_ns = d->start_time_ns;
+            }
+        }
         bd->num_samples = num_samples;
         bd->samples = samples;
 
@@ -844,6 +916,12 @@ void burst_detector_feed(burst_detector_t *d, const int8_t *iq,
             clock_gettime(CLOCK_REALTIME, &ts);
             d->start_time_ns = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
         }
+    }
+    /* Record a per-buffer UTC anchor at the first sample of this buffer so burst
+     * times can be re-derived from hardware time (drift-free). */
+    if (d->pending_hw_ts != 0) {
+        ts_anchor_push(d, d->sample_count, d->pending_hw_ts);
+        d->have_hw_anchor = 1;
     }
     d->pending_hw_ts = 0;
 
@@ -940,6 +1018,12 @@ void burst_detector_feed_cf32(burst_detector_t *d, const float *iq,
             clock_gettime(CLOCK_REALTIME, &ts);
             d->start_time_ns = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
         }
+    }
+    /* Record a per-buffer UTC anchor at the first sample of this buffer so burst
+     * times can be re-derived from hardware time (drift-free). */
+    if (d->pending_hw_ts != 0) {
+        ts_anchor_push(d, d->sample_count, d->pending_hw_ts);
+        d->have_hw_anchor = 1;
     }
     d->pending_hw_ts = 0;
 

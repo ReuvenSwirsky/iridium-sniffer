@@ -133,6 +133,7 @@ extern int center_freq_explicit;
 extern int iq_format_explicit;
 extern int clock_source;
 extern int time_source;
+extern int start_next_minute;
 
 static void usage(int exitcode) {
     fprintf(stderr,
@@ -156,6 +157,7 @@ static void usage(int exitcode) {
 "    -B, --bias-tee           enable bias tee power\n"
 "    --clock-source=SRC       clock reference: internal (default), external, gpsdo\n"
 "    --time-source=SRC        time/PPS reference: internal (default), external, gpsdo\n"
+"    --start-next-minute      delay capture start until the top of the next UTC minute\n"
 "\n"
 "Gain options:\n"
 "    --hackrf-lna=GAIN       HackRF LNA gain in dB (default: 40)\n"
@@ -303,6 +305,7 @@ void parse_options(int argc, char **argv) {
         OPT_ZMQ_SUB,
         OPT_CLOCK_SOURCE,
         OPT_TIME_SOURCE,
+        OPT_START_NEXT_MINUTE,
         OPT_SDRPLAY_GAIN,
         OPT_SIDEKIQ_GAIN,
         OPT_VITA49,
@@ -355,6 +358,7 @@ void parse_options(int argc, char **argv) {
         { "zmq-sub",        optional_argument, NULL, OPT_ZMQ_SUB },
         { "clock-source",   required_argument, NULL, OPT_CLOCK_SOURCE },
         { "time-source",    required_argument, NULL, OPT_TIME_SOURCE },
+        { "start-next-minute", no_argument,    NULL, OPT_START_NEXT_MINUTE },
         { "sdrplay-gain",   required_argument, NULL, OPT_SDRPLAY_GAIN },
         { "sidekiq-gain",   required_argument, NULL, OPT_SIDEKIQ_GAIN },
         { "vita49",         optional_argument, NULL, OPT_VITA49 },
@@ -744,6 +748,10 @@ void parse_options(int argc, char **argv) {
                 else
                     errx(1, "Unknown time source '%s'. "
                          "Use internal, external, or gpsdo.", optarg);
+                break;
+
+            case OPT_START_NEXT_MINUTE:
+                start_next_minute = 1;
                 break;
 
             case 'h':

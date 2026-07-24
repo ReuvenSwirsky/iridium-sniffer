@@ -5,10 +5,12 @@
 
 #include <err.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <uhd.h>
@@ -23,6 +25,8 @@ extern int usrp_gain_val;
 extern int clock_source;
 extern int time_source;
 extern int verbose;
+extern int start_next_minute;
+extern atomic_ulong stat_n_overflows;
 
 #define KVLEN 16
 typedef struct _kv_pair_t {
@@ -183,6 +187,80 @@ uhd_usrp_handle usrp_setup(char *serial) {
     return usrp;
 }
 
+/*
+ * Label the USRP device time counter to real UTC using the PPS edge.
+ *
+ * The PPS (from an external source or the GPSDO) marks each true UTC second
+ * boundary with high precision, but the device's integer-seconds value is
+ * arbitrary until we set it.  We only need the host clock to identify *which*
+ * UTC second the next PPS edge belongs to, so an accuracy of well under +/-0.5 s
+ * (rounded to the nearest second) is sufficient -- tens of milliseconds is
+ * plenty.  All sub-second precision comes from the PPS, not the host clock.
+ *
+ * Returns the UTC second on which streaming should begin (one PPS edge after
+ * the time is applied, so buffer 0 lands exactly on a UTC second boundary), or
+ * -1 if no PPS was detected / labeling failed (caller should fall back to
+ * stream_now).
+ */
+static int64_t usrp_align_time_to_utc(uhd_usrp_handle usrp) {
+    uhd_error error;
+    int64_t last_full;
+    double last_frac;
+    struct timespec ts;
+
+    /* Read the current "last PPS" device time so we can detect the next edge. */
+    if ((error = uhd_usrp_get_time_last_pps(usrp, 0, &last_full, &last_frac))
+            != UHD_ERROR_NONE) {
+        fprintf(stderr, "USRP: cannot read last PPS time (%u); "
+                        "UTC labeling disabled\n", error);
+        return -1;
+    }
+
+    /* Wait until a new PPS edge appears so we have ~1 s of headroom before the
+     * next one (poll for up to ~1.5 s). */
+    int64_t prev = last_full;
+    int detected = 0;
+    for (int i = 0; i < 1500; i++) {
+        struct timespec nap = { 0, 1000000 };  /* 1 ms */
+        nanosleep(&nap, NULL);
+        uhd_usrp_get_time_last_pps(usrp, 0, &last_full, &last_frac);
+        if (last_full != prev) {
+            detected = 1;
+            break;
+        }
+    }
+    if (!detected) {
+        fprintf(stderr, "USRP: no PPS detected; UTC labeling disabled\n");
+        return -1;
+    }
+
+    /* A PPS edge just occurred (within the last ~1 ms).  Its true time is the
+     * host clock reading rounded to the nearest second -- rounding (not floor)
+     * makes a host offset of tens of ms harmless near the boundary. */
+    clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t edge_sec = (int64_t)ts.tv_sec + (ts.tv_nsec >= 500000000L ? 1 : 0);
+    int64_t next_pps_sec = edge_sec + 1;
+
+    if ((error = uhd_usrp_set_time_next_pps(usrp, next_pps_sec, 0.0, 0))
+            != UHD_ERROR_NONE) {
+        fprintf(stderr, "USRP: set_time_next_pps failed (%u); "
+                        "UTC labeling disabled\n", error);
+        return -1;
+    }
+
+    if (verbose)
+        fprintf(stderr, "USRP: device time armed to UTC %ld on next PPS\n",
+                (long)next_pps_sec);
+
+    /* Start streaming once the device time is valid.  Normally that is the edge
+     * after the counter is set; with --start-next-minute, round up to the next
+     * whole UTC minute so the first sample lands on a minute boundary. */
+    int64_t start_sec = next_pps_sec + 1;
+    if (start_next_minute)
+        start_sec = ((start_sec + 59) / 60) * 60;
+    return start_sec;
+}
+
 void *usrp_stream_thread(void *arg) {
     uhd_usrp_handle usrp = arg;
     uhd_rx_streamer_handle rx_handle;
@@ -213,9 +291,47 @@ void *usrp_stream_thread(void *arg) {
         errx(1, "Error opening RX stream: %u", error);
 
     uhd_rx_streamer_max_num_samps(rx_handle, &num_samples);
-    uhd_rx_streamer_issue_stream_cmd(rx_handle, &stream_cmd);
 
     int hw_time = (time_source != CLOCK_SRC_INTERNAL);
+
+    /* When a PPS time source is available, label the device clock to real UTC
+     * and start the capture on a PPS edge so timestamps are absolute. */
+    if (hw_time) {
+        int64_t start_sec = usrp_align_time_to_utc(usrp);
+        if (start_sec > 0) {
+            stream_cmd.stream_now = 0;
+            stream_cmd.time_spec_full_secs = start_sec;
+            stream_cmd.time_spec_frac_secs = 0.0;
+            if (verbose)
+                fprintf(stderr, "USRP: capture will start at UTC %ld%s\n",
+                        (long)start_sec,
+                        start_next_minute ? " (top of minute)" : " (next PPS)");
+        }
+    }
+
+    /* Host-clock fallback: if a minute-aligned start was requested but no PPS
+     * timed start is armed (internal clock or PPS not detected), wait until the
+     * top of the next UTC minute before starting. */
+    if (start_next_minute && stream_cmd.stream_now) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        int64_t next_min = ((int64_t)now.tv_sec / 60 + 1) * 60;
+        if (verbose)
+            fprintf(stderr, "USRP: waiting for top of minute (UTC %ld)\n",
+                    (long)next_min);
+        while (running) {
+            clock_gettime(CLOCK_REALTIME, &now);
+            double rem = (double)(next_min - now.tv_sec) - now.tv_nsec / 1e9;
+            if (rem <= 0)
+                break;
+            struct timespec nap = (rem < 1.0)
+                ? (struct timespec){ 0, (long)(rem * 1e9) }
+                : (struct timespec){ (time_t)rem, 0 };
+            nanosleep(&nap, NULL);
+        }
+    }
+
+    uhd_rx_streamer_issue_stream_cmd(rx_handle, &stream_cmd);
 
     while (running) {
         sample_buf_t *s = malloc(sizeof(*s) + num_samples * 2 * sizeof(int8_t));
@@ -224,8 +340,16 @@ void *usrp_stream_thread(void *arg) {
         buf = s->samples;
         uhd_rx_streamer_recv(rx_handle, &buf, num_samples, &md, 3.0, false, &num_rx_samples);
         uhd_rx_metadata_error_code(md, &error_code);
-        if (error_code != UHD_RX_METADATA_ERROR_CODE_NONE && error_code != 8)
+        if (error_code == UHD_RX_METADATA_ERROR_CODE_OVERFLOW) {
+            /* Samples were dropped.  The next buffer's hardware time_spec
+             * reflects the true elapsed time, so burst timing re-anchors and
+             * self-corrects; just count the event for visibility. */
+            atomic_fetch_add(&stat_n_overflows, 1);
+            if (verbose)
+                fprintf(stderr, "USRP: overflow (samples dropped)\n");
+        } else if (error_code != UHD_RX_METADATA_ERROR_CODE_NONE) {
             errx(1, "Error during streaming: %u", error_code);
+        }
         s->num = num_rx_samples;
 
         /* Extract hardware timestamp when time source is configured */

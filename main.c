@@ -253,6 +253,9 @@ int beam_cache_lookup(uint64_t ts_ns, double *lat, double *lon,
 int clock_source = CLOCK_SRC_INTERNAL;
 int time_source = CLOCK_SRC_INTERNAL;
 
+/* Delay capture start until the top of the next UTC minute (USRP backend) */
+int start_next_minute = 0;
+
 /* Threading state */
 volatile sig_atomic_t running = 1;
 pid_t self_pid;
@@ -277,6 +280,7 @@ atomic_ulong stat_n_ok_sub = 0;
 atomic_ulong stat_n_dropped = 0;
 atomic_ulong stat_n_frame_drops = 0;
 atomic_ulong stat_n_output_drops = 0;
+atomic_ulong stat_n_overflows = 0;
 atomic_ulong stat_sample_count = 0;
 
 /* Global detector pointer for diagnostic stats (set by detector thread) */
@@ -776,6 +780,11 @@ static void *stats_thread_fn(void *arg) {
                 unsigned long od = atomic_load(&stat_n_output_drops);
                 if (fd > 0 || od > 0)
                     fprintf(stderr, " | fd: %lu/%lu", fd, od);
+            }
+            {
+                unsigned long ov = atomic_load(&stat_n_overflows);
+                if (ov > 0)
+                    fprintf(stderr, " | ov: %lu", ov);
             }
             fprintf(stderr, "\n");
         }
