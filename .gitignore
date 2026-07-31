@@ -6,3 +6,5 @@ build/
 compile_commands.json
 test-data/
 bursts/
+r/
+d/

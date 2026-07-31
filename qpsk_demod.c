@@ -363,7 +363,8 @@ static void map_symbols_to_bits(const int *symbols, int n, uint8_t *bits)
 
 /* ---- Burst IQ sample saving (for research/analysis) ---- */
 
-static void save_burst_iq(downmix_frame_t *in, const char *dir_name)
+static void save_burst_iq(downmix_frame_t *in, const int *symbols, int n_symbols,
+                          const char *dir_name)
 {
     if (!dir_name) return;
 
@@ -412,6 +413,43 @@ static void save_burst_iq(downmix_frame_t *in, const char *dir_name)
     fprintf(f, "noise_dbfs_hz: %.2f\n", in->noise);
     fprintf(f, "num_samples: %zu\n", in->num_samples);
     fprintf(f, "uw_start_offset: %.2f\n", in->uw_start);
+
+    /* Demodulated bit sequence (DQPSK-decoded, MSB-first, hex-packed).
+     * DQPSK differential decoding removes each receiver's absolute-phase
+     * ambiguity, so the same physical burst produces the same bits on every
+     * receiver regardless of LO phase.  This is the canonical key for matching
+     * bursts across receivers and for TDOA correlation.  Decode a scratch copy
+     * so the caller's symbol buffer is left untouched. */
+    if (symbols && n_symbols > 0) {
+        int *tmp = malloc((size_t)n_symbols * sizeof(int));
+        uint8_t *bits = malloc((size_t)n_symbols * 2);
+        if (tmp && bits) {
+            memcpy(tmp, symbols, (size_t)n_symbols * sizeof(int));
+            decode_dqpsk(tmp, n_symbols);
+            map_symbols_to_bits(tmp, n_symbols, bits);
+            int n_bits = n_symbols * 2;
+            fprintf(f, "demod_n_bits: %d\n", n_bits);
+            fprintf(f, "demod_bits: ");
+            unsigned int acc = 0;
+            int nb = 0;
+            for (int i = 0; i < n_bits; i++) {
+                acc = (acc << 1) | (bits[i] & 1);
+                if (++nb == 8) {
+                    fprintf(f, "%02x", acc & 0xff);
+                    acc = 0;
+                    nb = 0;
+                }
+            }
+            if (nb > 0) {
+                acc <<= (8 - nb);  /* left-align trailing bits */
+                fprintf(f, "%02x", acc & 0xff);
+            }
+            fprintf(f, "\n");
+        }
+        free(tmp);
+        free(bits);
+    }
+
     fclose(f);
 }
 
@@ -464,7 +502,7 @@ int qpsk_demod(downmix_frame_t *in, demod_frame_t **out)
                 /* Save failed burst IQ if requested (for demod analysis) */
                 if (save_bursts_dir) {
                     in->direction = DIR_UNDEF;
-                    save_burst_iq(in, save_bursts_dir);
+                    save_burst_iq(in, symbols, actual_symbols, save_bursts_dir);
                 }
                 return 0;
             }
@@ -485,7 +523,7 @@ int qpsk_demod(downmix_frame_t *in, demod_frame_t **out)
 
     /* Save burst IQ if requested (for research/analysis) */
     if (save_bursts_dir) {
-        save_burst_iq(in, save_bursts_dir);
+        save_burst_iq(in, symbols, actual_symbols, save_bursts_dir);
     }
 
     /* Step 5: DQPSK differential decode */
